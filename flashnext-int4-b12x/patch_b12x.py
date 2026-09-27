@@ -14,6 +14,7 @@ never modified -- a new container starts clean and the mod re-applies this.
                  original layer-1 weights sitting in two PLE-table files over V8's healed ones.
   OPTIONAL (a warning, the launch goes on):
     draft x2     VLLM_MTP_DRAFT_SCALE scales the draft's logits (exact: the verifier decides) -- +2.5pp acceptance.
+    mtp-cap      lets b12x's QSA take up to 7 speculative tokens (stock cap 4); the solo recipe runs 5.
     GDN fixes    spark-fla-shmem (GB10 gets the big GDN tiles) and spark-fla-warps (num_warps=2: fla#953 Blackwell race
                  that corrupts GDN state on the prefix-cache path), same one-liners as the qwen38-flash-dgx image.
 
@@ -151,6 +152,23 @@ def _scale(s):
     return pat.sub(lambda m: m.group(1) + m.group(2) +
                    f'scale=float(__import__("os").environ.get("VLLM_MTP_DRAFT_SCALE", "1.0")),  # {MARK}:draft-scale\n', s)
 edit(f"{MODEL_DIR}/mtp.py", _scale, "draft-scale", False)
+
+# 6. MTP depth up to 7 --------------------------------------------------------------------------------------------------
+# b12x's QSA refuses more than 4 speculative tokens (_QSA_MAX_SPECULATIVE_TOKENS = 4). At depth 5-7 its raw ring is 12 rows
+# (4 * ceil((4 + K) / 4)) and the b12x kernels take the ring size as a parameter; the only extra requirement is a page size
+# that 12 divides, which the solo recipe's block_size 1632 gives (1632 = 12 * 136 = 8 * 204). Depth 8 is refused further
+# down by b12x's GDN plan (state_index_columns = K + 1 <= 8), hence 7. Only the cap moves: nothing changes at depth <= 4.
+# Measured 2026-09-27 on the pinned 09-13 image: depth 5 = +4 % run.py tok/s over depth 4, same quality.
+def _mtp_cap(s):
+    m = re.search(r"^_QSA_MAX_SPECULATIVE_TOKENS = (\d+)$", s, re.M)
+    if not m:
+        return None
+    if int(m.group(1)) >= 7:
+        return s + f"\n# {MARK}:mtp-cap (this image already allows {m.group(1)})\n"
+    return s.replace(m.group(0), f"_QSA_MAX_SPECULATIVE_TOKENS = 7  # {MARK}:mtp-cap (was {m.group(1)})")
+_qsa = next((p for p in (f"{MODEL_DIR}/nvidia/qsa.py", f"{MODEL_DIR}/qsa.py")
+             if os.path.isfile(p) and "_QSA_MAX_SPECULATIVE_TOKENS" in open(p).read()), f"{MODEL_DIR}/nvidia/qsa.py")
+edit(_qsa, _mtp_cap, "mtp-cap", False)
 
 # 5. GDN fixes ---------------------------------------------------------------------------------------------------------
 fla = f"{V}/third_party/flash_linear_attention/ops"

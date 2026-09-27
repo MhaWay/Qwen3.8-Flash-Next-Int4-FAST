@@ -10,7 +10,7 @@ head_link="$(readlink "$MODEL_DIR/model_extra_tensors.safetensors" 2>/dev/null |
 [ -n "$head_link" ] && echo "MTP head:    ${head_link##*/}" | cut -c1-30
 [ "$BACKEND" = auto ] && BACKEND="${SETUP_BACKEND:-classic}"
 if [ "$BACKEND" = b12x ]; then
-  echo "draft:       set by the b12x recipe $B12X_RECIPE (depth 4, logits x2)"
+  echo "draft:       set by the b12x recipe $B12X_RECIPE (depth 5, logits x2)"
 elif [ "$MTP" != 0 ] && [ "$DRAFT_SCALE" != 1 ] && [ -f "$MODELS_DIR/.draft-scale/mtp.py" ]; then
   echo "draft:       depth $MTP, logits x$DRAFT_SCALE"
 else

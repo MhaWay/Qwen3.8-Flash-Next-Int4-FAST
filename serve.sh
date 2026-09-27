@@ -11,7 +11,7 @@
 MODEL_REPO="${MODEL_REPO:-azampatti/Qwen3.8-Flash-Next-125B-A5B-INT4-AutoRound}"  # which model; setup.sh downloads this one
 SERVED_NAME="${SERVED_NAME:-qwen3.8-flash-next-a5b}"  # the name clients send as "model"
 PORT="${PORT:-8000}"                                  # host port for the OpenAI-compatible API
-BACKEND="${BACKEND:-auto}"                            # auto = what setup.sh set up (b12x when it found Eugr's spark-vllm-docker) | b12x | classic (our image). b12x runs the solo recipe: only PORT CTX SEQS KV_BYTES SERVED_NAME CONTAINER EXTRA_ARGS apply, the recipe sets the rest (MTP 4, draft x2, medium)
+BACKEND="${BACKEND:-auto}"                            # auto = what setup.sh set up (b12x when it found Eugr's spark-vllm-docker) | b12x | classic (our image). b12x runs the solo recipe: only PORT CTX SEQS KV_BYTES SERVED_NAME CONTAINER EXTRA_ARGS apply, the recipe sets the rest (MTP 5, draft x2, medium)
 
 CTX="${CTX:-262144}"                                  # max tokens in ONE request (prompt + output)
 SEQS="${SEQS:-8}"                                     # how many requests may run at the same time

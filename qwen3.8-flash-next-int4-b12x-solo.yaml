@@ -15,6 +15,10 @@
 #     Phase 11 re-prefills ~60K tokens every time); "aligned" restores block-aligned GDN checkpoints = ~75 % hits like the pinned
 #     09-13 image (which ignores the policy for this model, so the flag is a no-op there).
 
+# 2026-09-27 (Prunning/qwen38_flash_next/port030/sweep/REPORT.md, test2/REPORT2.md): MTP 5 + max_num_batched_tokens 8192 = the
+#   everyday setting. Depth 5-7 tie single-stream (79.2 tok/s run.py) and deeper drafts waste work under concurrency; 8192 gives
+#   the best 4-stream throughput with ~4 GiB free (10240 leaves ~1 GiB; 6144 frees 2.6 GiB for ~5-23 % less under concurrency).
+
 recipe_version: "1"
 name: Qwen3.8-Flash-Next-INT4-AutoRound (b12x, single node)
 description: azampatti/Qwen3.8-Flash-Next-125B-A5B-INT4-AutoRound (V8, top-k 5) on a single DGX Spark / GB10 with the b12x stack
@@ -40,10 +44,10 @@ defaults:
   max_model_len: 262144
   max_num_seqs: 8
   max_num_batched_tokens: 8192
-  block_size: 16
+  block_size: 1632                   # MTP 5: the QSA ring is 12 rows, which must divide the page (1632 = 12 x 136 = 8 x 204)
   kv_cache_bytes: 20g
   gpu_memory_utilization: 0.01
-  num_speculative_tokens: 4          # MAX: QSA refuses >4 (qsa.py:951). A/B 2026-09-21: 3 = 97.8 tok/s (6 runs); 4 = ~104-105 (tau 4.01)
+  num_speculative_tokens: 5          # needs the mod's mtp-cap patch (b12x caps 4). 2026-09-27 sweep, run.py tok/s: 3 = 71.2, 4 = 76.0, 5-7 = 79.2 (8 refused by b12x)
   load_format: fastsafetensors
   chat_template: medium_chat_template.jinja
 
