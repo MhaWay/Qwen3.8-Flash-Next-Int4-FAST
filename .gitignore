@@ -2,3 +2,6 @@ __pycache__/
 *.pyc
 upstream/
 .backend
+.venv/
+visual-dataset/
+*.egg-info/
