@@ -116,6 +116,7 @@ if [ "$BACKEND" = b12x ]; then
     exit 1
   fi
   echo "  hidden-state capture ON: read route mounted (verified HTTP $code; HN_MAX_ENTRIES / HN_TTL_SECONDS default 1024 / 300s)"
+  exit 0
 fi
 [ "$BACKEND" = classic ] || { echo "BACKEND must be auto, b12x or classic (got '$BACKEND')" >&2; exit 1; }
 
