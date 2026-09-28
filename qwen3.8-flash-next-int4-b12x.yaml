@@ -1,6 +1,6 @@
 # Recipe: Qwen3.8-Flash-Next 125B-A5B INT4-AutoRound (V8 heal) on TWO GB10 nodes, eugr's b12x serving stack
 # Same model and settings as the single-node ~/Qwen3.8-Flash-Next-Int4-FAST/serve.sh (top-k 5, int4 experts + int4 lm_head,
-# fp8 PLE table served from disk, MTP 4 here (serve.sh uses 3) with the k=10 draft, block verify + probabilistic draft, draft x2, medium template),
+# fp8 PLE table served from disk, MTP 5 here (like the solo recipe) with the k=10 draft, block verify + greedy draft, draft x2, medium template),
 # split over two nodes: tensor parallel 2 + expert parallel, with b12x's RoCE all-reduce for the per-layer cross-node sums.
 #
 # LAUNCH:   ./run-recipe.py qwen3.8-flash-next-int4-b12x        (--dry-run prints the plan only). API on the HEAD node :8000.
@@ -55,11 +55,11 @@ defaults:
   served_name: azampatti/Qwen3.8-Flash-Next-125B-A5B-INT4-AutoRound
   max_model_len: 262144
   max_num_seqs: 16
-  max_num_batched_tokens: 8192
-  block_size: 16
+  max_num_batched_tokens: 8192       # cluster sweep at MTP 6, 8 streams: 8192 = 320 tok/s, 16384 = 314, 24576 = 319, 32768 = 311 (flat for short prompts); each +8192 costs ~8 GiB free RAM per node
+  block_size: 1632                   # MTP 5: the QSA ring is 12 rows, which must divide the page (1632 = 12 x 136 = 8 x 204)
   kv_cache_bytes: 20g
   gpu_memory_utilization: 0.01
-  num_speculative_tokens: 4          # MAX: QSA refuses >4 (qsa.py:951). A/B 2026-09-21: 3 = 97.8 tok/s (6 runs); 4 = ~104-105 (tau 4.01)
+  num_speculative_tokens: 5          # needs the mod's mtp-cap patch (b12x caps 4). Cluster sweep 2026-09-27 (greedy, batched 8192), run.py tok/s: 3 = 96.8, 4 = 103.9, 5 = 109.2, 6 = 112.7, 7 = 110.8; 4 short concurrent requests: 159 at 4-5 vs 143 at 6 -> 5 balances one user and several
   load_format: safetensors
   chat_template: medium_chat_template.jinja
 
