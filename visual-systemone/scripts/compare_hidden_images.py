@@ -29,13 +29,13 @@ def fetch_json(url, data=None):
 
 
 def capture(base, model, path, prompt):
-    image = "data:image/jpeg;base64," + base64.b64encode(path.read_bytes()).decode()
+    content = [{"type": "text", "text": prompt}]
+    if path is not None:
+        image = "data:image/jpeg;base64," + base64.b64encode(path.read_bytes()).decode()
+        content.insert(0, {"type": "image_url", "image_url": {"url": image}})
     reply = fetch_json(base + "/v1/chat/completions", {
         "model": model,
-        "messages": [{"role": "user", "content": [
-            {"type": "image_url", "image_url": {"url": image}},
-            {"type": "text", "text": prompt},
-        ]}],
+        "messages": [{"role": "user", "content": content}],
         "max_tokens": 1,
         "temperature": 0,
         "chat_template_kwargs": {"enable_thinking": False},
@@ -49,7 +49,7 @@ def capture(base, model, path, prompt):
     vector.frombytes(base64.b64decode(result["b64"], validate=True))
     if len(vector) != 2560 or not all(math.isfinite(value) for value in vector):
         raise RuntimeError("Invalid hidden vector")
-    print(f"{path.name}: {req_id}, shape={result['shape']}, dtype={result['dtype']}")
+    print(f"{path.name if path else 'text-only'}: {req_id}, shape={result['shape']}, dtype={result['dtype']}, output={reply['choices'][0]['message']['content']!r}")
     return vector
 
 
@@ -64,16 +64,23 @@ def distance(a, b):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("first", type=Path, help="first JPEG")
-    parser.add_argument("second", type=Path, help="different JPEG")
+    parser.add_argument("first", type=Path, nargs="?", help="first JPEG")
+    parser.add_argument("second", type=Path, nargs="?", help="different JPEG")
+    parser.add_argument("--text-only", action="store_true", help="repeat one text prompt three times without images")
     parser.add_argument("--url", default="http://127.0.0.1:8000")
     parser.add_argument("--model", default="qwen3.8-flash-next-a5b")
     args = parser.parse_args()
-    if args.first.resolve() == args.second.resolve():
-        parser.error("Use two different image files")
-    for image in (args.first, args.second):
-        if not image.is_file():
-            parser.error(f"Missing image: {image}")
+    if args.text_only:
+        if args.first is not None or args.second is not None:
+            parser.error("Do not pass image paths with --text-only")
+    else:
+        if args.first is None or args.second is None:
+            parser.error("Pass two JPEG paths or use --text-only")
+        if args.first.resolve() == args.second.resolve():
+            parser.error("Use two different image files")
+        for image in (args.first, args.second):
+            if not image.is_file():
+                parser.error(f"Missing image: {image}")
     prompt = "Describe the visible shape in one short sentence."
     base = args.url.rstrip("/")
     first = capture(base, args.model, args.first, prompt)
