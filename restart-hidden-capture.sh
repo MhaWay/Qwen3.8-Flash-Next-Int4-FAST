@@ -45,6 +45,11 @@ echo "restart=running" >>"$OUT"
 if [ ! -f "$SERVE" ]; then fail "servescript-missing"; fi
 if [ ! -f "$HERE/flashnext-int4-b12x/hidden_state.py" ]; then fail "mod-missing"; fi
 
+# Install the just-pulled mod copy BEFORE touching the running container. A
+# failed setup leaves the old service alive. The pinned image is reused when present.
+log "refreshing Eugr mod from this checkout before stopping the model"
+if ! "$HERE/eugr-setup.sh" >>"$LOG" 2>&1; then fail "mod-install"; fi
+
 BEFORE="$(docker ps -a --format '{{.Names}} {{.Status}}' --filter "name=^${CONTAINER}$" 2>/dev/null || true)"
 log "container before: '${BEFORE:-none}'"
 if printf '%s' "$BEFORE" | grep -qE "^${CONTAINER} Up"; then
