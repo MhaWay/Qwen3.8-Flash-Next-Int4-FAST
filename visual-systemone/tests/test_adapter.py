@@ -1,4 +1,5 @@
 import asyncio
+from dataclasses import replace
 
 import pytest
 from fastapi.testclient import TestClient
@@ -17,6 +18,17 @@ def test_latest_frame_replaces_previous():
         assert second.seq == first.seq + 1
         assert (await store.get("s")).jpeg == b"two"
         assert len(store.frames) == 1
+    asyncio.run(scenario())
+
+
+def test_expired_session_restarts_seq_but_new_frame_has_new_identity():
+    async def scenario():
+        store = FrameStore()
+        first = await store.put("s", b"one")
+        store.frames["s"] = replace(first, received=first.received - 100)
+        second = await store.put("s", b"two")
+        assert first.seq == second.seq == 1
+        assert first.revision != second.revision
     asyncio.run(scenario())
 
 
@@ -65,6 +77,16 @@ class MissingCandidate(FakeVLLM):
         return response
 
 
+class FrameReplacedAfterExpiry(FakeVLLM):
+    async def post(self, path, json):
+        if path == "/v1/chat/completions":
+            store = app.state.store
+            current = store.frames["minecraft"]
+            store.frames["minecraft"] = replace(current, received=current.received - 100)
+            await store.put("minecraft", JPEG)
+        return await super().post(path, json)
+
+
 def test_end_to_end_choice_one_current_frame():
     with TestClient(app) as client:
         app.state.client = FakeVLLM()
@@ -93,3 +115,15 @@ def test_missing_candidate_returns_error_instead_of_action():
                 "move": {"type": "choice", "instructions": "Move?",
                          "criteria": {"forward": "Forward", "stop": "Stop"}}}})
         assert response.status_code == 502
+
+
+def test_expired_frame_replacement_during_decision_returns_conflict():
+    with TestClient(app) as client:
+        app.state.client = FrameReplacedAfterExpiry()
+        client.post("/v1/vision/minecraft/frame", content=JPEG,
+                    headers={"Content-Type": "image/jpeg"})
+        response = client.post("/v1/systemone", json={
+            "state_id": "minecraft", "state": "Test", "questions": {
+                "move": {"type": "choice", "instructions": "Move?",
+                         "criteria": {"forward": "Forward", "stop": "Stop"}}}})
+        assert response.status_code == 409
