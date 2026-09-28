@@ -111,14 +111,18 @@ def test_two_ids_same_uuid_is_ambiguous():
 
 def test_ttl_and_lru():
     st = hs._Store(max_entries=2, ttl=0.05)
-    st.put("a", torch.ones(1))
-    st.put("b", torch.ones(1))
+    a, b, c, d, e = (f"chatcmpl-{_uuid(i)}" for i in range(100, 105))
+    st.put(a, torch.ones(1))
+    st.put(b, torch.ones(1) * 2)
+    assert len(st.vecs) == 2 and st.read(a) is not None, "initial inserts failed"
     time.sleep(0.07)
-    assert st.read("a") is None, "expired entry not dropped"
-    st.put("c", torch.ones(1))
-    st.put("d", torch.ones(1))
-    st.put("e", torch.ones(1))
-    assert len(st.vecs) <= 2, "LRU broke past its ceiling"
+    assert st.read(a) is None and st.read(b) is None, "expired entries were retained"
+    st.put(c, torch.ones(1) * 3)
+    st.put(d, torch.ones(1) * 4)
+    assert st.read(c) is not None, "new capture not stored"
+    st.put(e, torch.ones(1) * 5)
+    assert st.read(d) is None and st.read(c) is not None and st.read(e) is not None, "LRU evicted the wrong capture"
+    assert len(st.vecs) == 2, "LRU exceeded its ceiling"
     print("ttl + lru OK")
 
 
