@@ -39,7 +39,7 @@ RESTART_STARTED=0
 restore_baseline() {
   [ "$RESTART_STARTED" = 1 ] || return 0
   log "restoring the previous serving mode with HIDDEN_CAPTURE=0"
-  if HIDDEN_CAPTURE=0 bash "$SERVE" -d >>"$LOG" 2>&1; then
+  if BACKEND=b12x HIDDEN_CAPTURE=0 bash "$SERVE" -d >>"$LOG" 2>&1; then
     local deadline=$(( $(date +%s) + READY_TIMEOUT ))
     while [ "$(date +%s)" -lt "$deadline" ]; do
       if curl -fsS --max-time 5 "http://$API_HOST:$API_PORT/health" >/dev/null 2>&1; then
@@ -102,12 +102,12 @@ if not all(checks.values()):
   docker stop "$CONTAINER" >>"$LOG" 2>&1 || true
 fi
 
-log "serve.sh -d HIDDEN_CAPTURE=1 (serve.sh validates the patch, starts detached, polls the route itself)"
+log "BACKEND=b12x serve.sh -d HIDDEN_CAPTURE=1 (pinned Eugr recipe, detached, route probe)"
 # serve.sh with HIDDEN_CAPTURE=1 refuses to report success unless the read route answers 422/400/200 etc.
 # On a missing router/anchor it prints FATAL and exits 1 -- captured here and re-reported.
 # NOTE: NOT exec, so we learn serve's verdict.
 cd "$HERE"
-HIDDEN_CAPTURE=1 bash ./serve.sh -d >>"$LOG" 2>&1
+BACKEND=b12x HIDDEN_CAPTURE=1 bash ./serve.sh -d >>"$LOG" 2>&1
 SERVE_RC=$?
 log "serve.sh exit=$SERVE_RC"
 if [ "$SERVE_RC" != 0 ]; then
