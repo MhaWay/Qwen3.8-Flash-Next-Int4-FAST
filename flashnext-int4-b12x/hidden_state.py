@@ -52,8 +52,8 @@ def _canon(req_id):
 
     Accepted forms: `chatcmpl-<16hex>`, optional `-<8hex>`, and equivalent
     32-hex or hyphenated UUID forms (what HTTP callers and engines hold); the bare
-    engine-side forms are also accepted. Any truncated or malformed string --
-    is None, so it can never match a stored capture. The prefix is optional only
+    engine-side forms are also accepted. A truncated or malformed string returns
+    None, so it can never match a stored capture. The prefix is optional only
     because the same uuid appears on both sides of the engine's id rewrite; the
     match is by parsed (uuid, suffix) pair, never by string prefix.
     """
