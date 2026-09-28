@@ -182,13 +182,12 @@ edit(f"{fla}/chunk_delta_h.py",
 # FLASHNEXT_HIDDEN_REQUIRED=1 into the mod container before run.sh runs.
 if os.environ.get("FLASHNEXT_HIDDEN_REQUIRED") == "1":
     # 7. hidden-state capture hook --------------------------------------------------------------------------------------
-    # Optional: installed in EVERY launch, but dormant (zero cost, inert) unless the serve command adds
-    # --worker-extension-cls=vllm_hidden_state.HiddenStateExtension (serve.sh: HIDDEN_CAPTURE=1). The module is copied so the
+    # Only installed for HIDDEN_CAPTURE=1. The module is copied so the
     # extension's qualname resolves and so both the worker (capture + hidden_state_read) and the API (read route) import it.
     shutil.copy(os.path.join(MOD, "hidden_state.py"), f"{SP}/vllm_hidden_state.py")
     # runner: capture the end-of-prompt row once per request. Anchored on the FIRST of sample()'s two lines; the call is a
-    # gated no-op when the extension is off, and disables itself permanently on any unexpected layout, so a wrong anchor can
-    # never break serving and this stays optional (a bad build warns, the launch still goes).
+    # gated no-op when the extension is off, and disables itself on an unexpected runtime layout.
+    # The anchor itself is REQUIRED for opt-in startup.
     edit(f"{V}/v1/worker/gpu/model_runner.py",
          lambda s: once(
              s,
