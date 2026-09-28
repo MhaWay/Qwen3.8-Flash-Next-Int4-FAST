@@ -33,12 +33,12 @@ done
 if [ "$SYNC_ONLY" != 1 ]; then
   command -v docker >/dev/null || { echo "docker is not installed" >&2; exit 1; }
   if docker image inspect "$B12X_IMAGE" --format '{{json .RepoDigests}}' 2>/dev/null | grep -q "${B12X_IMAGE_PIN#*@}"; then
-  echo "Image $B12X_IMAGE already is the pinned build (${B12X_IMAGE_PIN#*@sha256:})"
-else
-  echo "Pulling the pinned b12x image (~25 GB the first time) ..."
-  docker pull "$B12X_IMAGE_PIN"
-  docker tag "$B12X_IMAGE_PIN" "$B12X_IMAGE"
-  echo "Tagged it as $B12X_IMAGE"
+    echo "Image $B12X_IMAGE already is the pinned build (${B12X_IMAGE_PIN#*@sha256:})"
+  else
+    echo "Pulling the pinned b12x image (~25 GB the first time) ..."
+    docker pull "$B12X_IMAGE_PIN"
+    docker tag "$B12X_IMAGE_PIN" "$B12X_IMAGE"
+    echo "Tagged it as $B12X_IMAGE"
   fi
   [ "$PULL_ONLY" = 1 ] && exit 0
 fi
