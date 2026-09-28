@@ -45,7 +45,8 @@ def _ib(n=1, is_pf=None, computed=None, ub=None, plen=None,
         cu = np.concatenate([[0], np.cumsum(n_logits)]).astype(np.int64)
     rows = int(cu[-1])
     if req_ids is None:
-        req_ids = [f"chatcmpl-{_uuid(i)}" + ("-%08x" % (1234567 + i * 7) if suffix else "")
+        # Match the 16-hex IDs observed from the pinned server.
+        req_ids = [f"chatcmpl-{i:016x}" + ("-%08x" % (1234567 + i * 7) if suffix else "")
                    for i in range(n)]
     ib = SimpleNamespace(
         num_reqs=n,
@@ -89,6 +90,10 @@ def test_id_and_miss():
     assert st.read("chatcmpl-" + uuid)["req_id"] == full, "bare http id must resolve unique suffix"
     assert st.read("%s-abcd1234" % uuid)["req_id"] == full, "engine-side form must resolve too"
     assert st.read("chatcmpl-%s-abc0ffff" % _uuid(77)) is None, "unknown id returned data"
+    live_id = "chatcmpl-a76bf1deaedfbc23"
+    st.put(live_id + "-1a2b3c4d", torch.ones(7))
+    assert st.read(live_id)["req_id"] == live_id + "-1a2b3c4d", "real 16-hex response ID did not resolve"
+    assert st.read(live_id + "-wrong") is None, "malformed engine suffix accepted"
     assert st.read("chatcmpl-abc12") is None, "partial/garbage id was accepted"
     assert st.read("5") is None, "bare non-uuid id was accepted"
     assert st.read("") is None and st.read(None) is None, "empty/None accepted"
