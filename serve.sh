@@ -40,7 +40,7 @@ HF_HOME="${HF_HOME:-$HOME/.cache/huggingface}"        # where the HF cache lives
 MODELS_DIR="${MODELS_DIR:-$HOME/models}"              # plain-folder location (local mode) + the small draft folder
 
 EXTRA_ARGS="${EXTRA_ARGS:-}"                          # anything else to append to the vLLM command line
-HIDDEN_CAPTURE="${HIDDEN_CAPTURE:-0}"                 # b12x opt-in: keep the end-of-prompt hidden state of served requests in worker RAM for 10 min; read with GET /flashnext/hidden_state/read?req_id=<chatcmpl-uuid>. 0 = route/capture not present, serving unchanged
+HIDDEN_CAPTURE="${HIDDEN_CAPTURE:-0}"                 # b12x opt-in: keep the end-of-prompt hidden state of served requests for 5 min; read with GET /flashnext/hidden_state/read?req_id=<chatcmpl-uuid>. 0 = route/capture not present, serving unchanged
 DOCKER_EXTRA_ARGS="${DOCKER_EXTRA_ARGS:-}"            # extra flags for docker run itself (bind mounts, -e variables)
 # <<< SETTINGS <<<
 # ════════════════════════════════════════════════════════════════════════
@@ -67,7 +67,18 @@ if [ "$BACKEND" = b12x ]; then
   B12X=(--solo -t "$B12X_IMAGE" --port "$PORT" --max-model-len "$CTX" --name "$CONTAINER"); [ "$DETACH" = 1 ] && B12X+=(-d)
   # HIDDEN_CAPTURE=1 adds the opt-in worker extension. The recipe's mod installs the
   # capture module; without this flag the patched hook never enters numpy, so OFF == untouched serving.
-  [ "$HIDDEN_CAPTURE" = 1 ] && EXTRA_ARGS="$EXTRA_ARGS --worker-extension-cls=vllm_hidden_state.HiddenStateExtension"
+  if [ "$HIDDEN_CAPTURE" = 1 ]; then
+    # eugr-setup.sh installs a COPY of this mod. Check it before removing the
+    # working container; a git pull alone does not update Eugr's copy.
+    for mod_file in hidden_state.py patch_b12x.py; do
+      cmp -s "./flashnext-int4-b12x/$mod_file" "$EUGR_DIR/mods/flashnext-int4-b12x/$mod_file" || {
+        echo "FATAL: Eugr's $mod_file is stale or missing; run ./eugr-setup.sh before restarting" >&2
+        exit 1
+      }
+    done
+    B12X+=(-e FLASHNEXT_HIDDEN_REQUIRED=1)
+    EXTRA_ARGS="$EXTRA_ARGS --worker-extension-cls=vllm_hidden_state.HiddenStateExtension"
+  fi
   echo "Serving $MODEL_REPO with Eugr's b12x stack ($B12X_IMAGE, recipe $B12X_RECIPE) -- ${CTX} ctx, KV $KV_BYTES on port $PORT"
   docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
   cd "$EUGR_DIR"
