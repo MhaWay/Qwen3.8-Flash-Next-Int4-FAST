@@ -3,11 +3,18 @@
 #   ./eugr-setup.sh                         (expects ~/spark-vllm-docker)
 #   EUGR_DIR=/other/path ./eugr-setup.sh
 #   ./eugr-setup.sh --pull-only             (only the pinned image; setup.sh uses this to decide which image to serve with)
+#   ./eugr-setup.sh --sync-only             (only copy this fork's mod + recipes; no Docker or image operations)
 # setup.sh runs this for you when Eugr's repo is there. Re-run it after every 'git pull' here to update the copies there.
 set -euo pipefail
 cd "$(dirname "$0")"; source ./config.env   # EUGR_DIR, B12X_IMAGE, B12X_IMAGE_PIN
 
-PULL_ONLY=0; [ "${1:-}" = "--pull-only" ] && PULL_ONLY=1
+PULL_ONLY=0; SYNC_ONLY=0
+case "${1:-}" in
+  --pull-only) PULL_ONLY=1 ;;
+  --sync-only) SYNC_ONLY=1 ;;
+  "") ;;
+  *) echo "Usage: ./eugr-setup.sh [--pull-only|--sync-only]" >&2; exit 2 ;;
+esac
 MOD=flashnext-int4-b12x
 RECIPES=(qwen3.8-flash-next-int4-b12x-solo.yaml qwen3.8-flash-next-int4-b12x.yaml)
 
@@ -23,23 +30,25 @@ for f in "$MOD" "${RECIPES[@]}"; do
   [ -e "$f" ] || { echo "Missing $f in $(pwd) -- run 'git pull' in this folder first." >&2; exit 1; }
 done
 
-command -v docker >/dev/null || { echo "docker is not installed" >&2; exit 1; }
-if docker image inspect "$B12X_IMAGE" --format '{{json .RepoDigests}}' 2>/dev/null | grep -q "${B12X_IMAGE_PIN#*@}"; then
+if [ "$SYNC_ONLY" != 1 ]; then
+  command -v docker >/dev/null || { echo "docker is not installed" >&2; exit 1; }
+  if docker image inspect "$B12X_IMAGE" --format '{{json .RepoDigests}}' 2>/dev/null | grep -q "${B12X_IMAGE_PIN#*@}"; then
   echo "Image $B12X_IMAGE already is the pinned build (${B12X_IMAGE_PIN#*@sha256:})"
 else
   echo "Pulling the pinned b12x image (~25 GB the first time) ..."
   docker pull "$B12X_IMAGE_PIN"
   docker tag "$B12X_IMAGE_PIN" "$B12X_IMAGE"
   echo "Tagged it as $B12X_IMAGE"
+  fi
+  [ "$PULL_ONLY" = 1 ] && exit 0
 fi
-[ "$PULL_ONLY" = 1 ] && exit 0
 
 rm -rf "$EUGR_DIR/mods/$MOD"
 cp -r "$MOD" "$EUGR_DIR/mods/$MOD"
 cp "${RECIPES[@]}" "$EUGR_DIR/recipes/"
 
-echo "Image: $B12X_IMAGE = $B12X_IMAGE_PIN"
-echo "  Do not run build-and-copy.sh --exp-b12x afterwards: it re-pulls Eugr's 'latest' over this tag."
+[ "$SYNC_ONLY" = 1 ] && echo "Mod and recipes synchronized; Docker image and Eugr checkout untouched." || echo "Image: $B12X_IMAGE = $B12X_IMAGE_PIN"
+[ "$SYNC_ONLY" = 1 ] || echo "  Do not run build-and-copy.sh --exp-b12x afterwards: it re-pulls Eugr's 'latest' over this tag."
 echo "Installed into $EUGR_DIR:"
 echo "  mods/$MOD/"
 for r in "${RECIPES[@]}"; do echo "  recipes/$r"; done
