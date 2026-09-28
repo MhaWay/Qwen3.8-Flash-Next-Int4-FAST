@@ -38,21 +38,21 @@ MAX_ENTRIES = int(os.environ.get("HN_MAX_ENTRIES", "1024"))
 TTL_SECONDS = float(os.environ.get("HN_TTL_SECONDS", "300"))
 _MARKER = "HiddenStateExtension"
 
-# Strict request-id grammar, no ambiguity. A valid id is one uuid (8-4-4-4-12
-# hex) optionally wrapped as `chatcmpl-<uuid>` and/or carrying the random 8-hex
-# suffix vLLM's input_processor appends to the HTTP id. The suffix is exactly 8
-# hex, never 12, so uuid-vs-uuid+suffix splits unambiguously. Nothing else --
-# no partial prefixes like `chatcmpl-5` -- can identify a capture.
-_UUID = r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
-_CANON = re.compile(r"^(?:chatcmpl-)?(" + _UUID + r")(?:-([0-9a-fA-F]{8}))?$")
+# The pinned server emits chatcmpl-<16 hex> (observed in live responses).
+# Also accept 32-hex and canonical UUID forms for compatible vLLM builds.
+# The engine may append one 8-hex suffix; partial IDs remain invalid.
+_BASE_ID = (r"(?:[0-9a-fA-F]{16}|[0-9a-fA-F]{32}|"
+            r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+            r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12})")
+_CANON = re.compile(r"^(?:chatcmpl-)?(" + _BASE_ID + r")(?:-([0-9a-fA-F]{8}))?$")
 
 
 def _canon(req_id):
     """Parse a request id into (uuid, suffix-or-None) or None if not canonical.
 
-    Accepted forms: `chatcmpl-<uuid>`, `chatcmpl-<uuid>-<8hex>` (what an HTTP
-    caller holds / what the engine stores), and the bare `<uuid>` / `<uuid>-<8hex>`
-    engine-side forms. Any other string -- truncated, substring, wrong length --
+    Accepted forms: `chatcmpl-<16hex>`, optional `-<8hex>`, and equivalent
+    32-hex or hyphenated UUID forms (what HTTP callers and engines hold); the bare
+    engine-side forms are also accepted. Any truncated or malformed string --
     is None, so it can never match a stored capture. The prefix is optional only
     because the same uuid appears on both sides of the engine's id rewrite; the
     match is by parsed (uuid, suffix) pair, never by string prefix.
@@ -260,7 +260,7 @@ def attach_read_route(app, engine_selector=None):
             # which is what restart-hidden-capture.sh verifies.
             raise HTTPException(
                 status_code=400,
-                detail="req_id must be chatcmpl-<uuid> or chatcmpl-<uuid>-<8hex>",
+                detail="req_id must be chatcmpl-<16hex> (or UUID) with optional -<8hex>",
             )
         engine = (engine_selector(request) if engine_selector
                   else request.app.state.engine_client)
