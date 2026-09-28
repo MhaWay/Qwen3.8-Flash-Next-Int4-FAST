@@ -33,7 +33,7 @@ import time
 # captured data at ~5 MB per worker (~5 KB x 1024).
 #   HN_MAX_ENTRIES (default 1024) = most requests held at once (LRU ceiling)
 #   HN_TTL_SECONDS (default 300)  = a captured vector lives 5 min after capture
-# Raise only while a probe needs a longer/wider window (1024 -> 8192 is ~10 MB).
+# Raise only while a probe needs a longer/wider window (8192 entries are ~40 MiB of bf16 values).
 MAX_ENTRIES = int(os.environ.get("HN_MAX_ENTRIES", "1024"))
 TTL_SECONDS = float(os.environ.get("HN_TTL_SECONDS", "300"))
 _MARKER = "HiddenStateExtension"
@@ -135,6 +135,8 @@ class _Store:
             return None
         vec, _ = self.vecs[hit]
         self.vecs[hit] = (vec, now)  # a read refreshes TTL/LRU
+        self.order.remove(hit)
+        self.order.append(hit)
         import torch
 
         cpu = vec.detach().to("cpu", copy=True)
