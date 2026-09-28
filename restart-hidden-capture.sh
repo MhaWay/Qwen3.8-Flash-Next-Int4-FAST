@@ -87,7 +87,7 @@ log "health = 200 OK"
 
 # serve.sh already proved the route exists; this is an independent second look: a bare request without
 # req_id must NOT be 404 (200/422/400 all mean FastAPI owns the path and it registered).
-code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 8 "http://$API_HOST:$API_PORT/flashnext/hidden_state/read?" 2>/dev/null || echo 000)"
+code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 8 "http://$API_HOST:$API_PORT/flashnext/hidden_state/read?" 2>/dev/null)" || code=000
 log "bare GET /flashnext/hidden_state/read -> HTTP $code"
 [ "$code" != 404 ] && [ "$code" != 000 ] || fail "route-404"
 log "read route confirmed (not a 404)"
@@ -115,6 +115,7 @@ if [ -z "$capture" ]; then
 fi
 hs="$(printf '%s' "$capture" | grep -oE '"hidden_size"[[:space:]]*:[[:space:]]*[0-9]+' | grep -oE '[0-9]+$')"
 log "captured req_id=$REQ_ID hidden_size=${hs:-unknown}"
+[ "$hs" = 2560 ] || fail "hidden-size-mismatch"
 
 verdict "restart=ok container=$CONTAINER route=live req=$REQ_ID hidden_size=${hs:-unknown} log=$LOG"
 log "DONE. Everything outside this container (gateway, recipe, MTP) is untouched. To turn OFF: unset HIDDEN_CAPTURE and run ./serve.sh -d"
