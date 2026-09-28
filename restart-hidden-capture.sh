@@ -35,7 +35,31 @@ verdict() {                       # last line wins, append so the outcome file i
   printf '%s\n' "$*" >>"$OUT"
   if [ "${1%%=*}" = restart ] && [ "${1#restart=}" != ok ]; then :; fi
 }
-fail() { log "FAIL: $*"; verdict "restart=failed reason=$1"; exit 1; }
+RESTART_STARTED=0
+restore_baseline() {
+  [ "$RESTART_STARTED" = 1 ] || return 0
+  log "restoring the previous serving mode with HIDDEN_CAPTURE=0"
+  if HIDDEN_CAPTURE=0 bash "$SERVE" -d >>"$LOG" 2>&1; then
+    local deadline=$(( $(date +%s) + READY_TIMEOUT ))
+    while [ "$(date +%s)" -lt "$deadline" ]; do
+      if curl -fsS --max-time 5 "http://$API_HOST:$API_PORT/health" >/dev/null 2>&1; then
+        verdict "rollback=ok mode=baseline"
+        log "baseline serving restored"
+        return 0
+      fi
+      sleep 3
+    done
+  fi
+  verdict "rollback=failed"
+  log "baseline serving could not be confirmed; inspect container logs"
+  return 1
+}
+fail() {
+  log "FAIL: $*"
+  verdict "restart=failed reason=$1"
+  restore_baseline || true
+  exit 1
+}
 
 # Outcome file starts clean (one verdict per run) and the log keeps its history.
 : >"$OUT"
@@ -74,6 +98,7 @@ if not all(checks.values()):
     raise SystemExit(1)
 ' >>"$LOG" 2>&1; then fail "runtime-anchor-mismatch"; fi
   log "runtime anchors present; stopping running container"
+  RESTART_STARTED=1
   docker stop "$CONTAINER" >>"$LOG" 2>&1 || true
 fi
 
@@ -86,9 +111,8 @@ HIDDEN_CAPTURE=1 bash ./serve.sh -d >>"$LOG" 2>&1
 SERVE_RC=$?
 log "serve.sh exit=$SERVE_RC"
 if [ "$SERVE_RC" != 0 ]; then
-  verdict "restart=failed reason=serve-rc-$SERVE_RC"
-  log "serve.sh failed. If reason looks like route-404 / anchor missing, the vLLM inside the image is not the pinned build."
-  exit "$SERVE_RC"
+  log "serve.sh failed. Inspect its patch and route output above."
+  fail "serve-rc-$SERVE_RC"
 fi
 log "serve.sh OK: it saw the read route registered"
 
