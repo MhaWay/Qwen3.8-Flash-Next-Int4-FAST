@@ -103,7 +103,7 @@ if [ "$BACKEND" = b12x ]; then
   deadline=$(( $(date +%s) + ${READY_TIMEOUT:-600} )); code=000
   while :; do
     if curl -fsS --max-time 5 "http://127.0.0.1:$PORT/health" >/dev/null 2>&1; then
-      code=$( { curl -s -o /dev/null --max-time 8 -w '%{http_code}' "http://127.0.0.1:$PORT/flashnext/hidden_state/read" 2>/dev/null; } || echo 000 )
+      code=$(curl -s -o /dev/null --max-time 8 -w '%{http_code}' "http://127.0.0.1:$PORT/flashnext/hidden_state/read" 2>/dev/null) || code=000
       [ "$code" != 000 ] && [ "$code" != 404 ] && break
     fi
     [ "$(date +%s)" -lt "$deadline" ] || break
