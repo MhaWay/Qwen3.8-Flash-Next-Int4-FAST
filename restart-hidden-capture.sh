@@ -53,7 +53,27 @@ if ! "$HERE/eugr-setup.sh" --sync-only >>"$LOG" 2>&1; then fail "mod-install"; f
 BEFORE="$(docker ps -a --format '{{.Names}} {{.Status}}' --filter "name=^${CONTAINER}$" 2>/dev/null || true)"
 log "container before: '${BEFORE:-none}'"
 if printf '%s' "$BEFORE" | grep -qE "^${CONTAINER} Up"; then
-  log "stopping running container (serve.sh also docker rm -f's it, this is just for a clean timeline)"
+  # Check the running image before stopping it. A mismatch leaves Qwen alive.
+  log "checking vLLM patch anchors and InputBatch fields (read-only)"
+  if ! docker exec "$CONTAINER" python3 -c '
+from pathlib import Path
+root = Path("/usr/local/lib/python3.12/dist-packages/vllm")
+runner = (root / "v1/worker/gpu/model_runner.py").read_text()
+routers = (root / "entrypoints/launchers/api_server/routers.py").read_text()
+anchor = "    ) -> tuple[SamplerOutput, torch.Tensor, torch.Tensor]:\n        shard_metadata = None"
+checks = {
+    "sample-anchor": runner.count(anchor) == 1,
+    "route-anchor": routers.count("    register_vllm_serve_api_routers(app)\n") == 1,
+}
+for name in ("is_prefilling_np", "num_computed_tokens_np", "seq_lens_cpu_upper_bound",
+             "prefill_len_np", "cu_num_logits_np", "logits_indices"):
+    checks[name] = name in runner
+for name, ok in checks.items():
+    print(f"{name}: {ok}")
+if not all(checks.values()):
+    raise SystemExit(1)
+' >>"$LOG" 2>&1; then fail "runtime-anchor-mismatch"; fi
+  log "runtime anchors present; stopping running container"
   docker stop "$CONTAINER" >>"$LOG" 2>&1 || true
 fi
 
