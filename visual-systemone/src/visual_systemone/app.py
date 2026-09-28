@@ -30,12 +30,14 @@ class Frame:
     jpeg: bytes
     seq: int
     received: float
+    revision: int
 
 
 class FrameStore:
     def __init__(self) -> None:
         self.frames: dict[str, Frame] = {}
         self.lock = asyncio.Lock()
+        self.next_revision = 0
 
     async def put(self, session: str, jpeg: bytes) -> Frame:
         async with self.lock:
@@ -43,7 +45,9 @@ class FrameStore:
             self.frames = {k: v for k, v in self.frames.items() if now - v.received < FRAME_TTL}
             if session not in self.frames and len(self.frames) >= MAX_SESSIONS:
                 raise HTTPException(429, "Session limit reached")
-            frame = Frame(jpeg, self.frames[session].seq + 1 if session in self.frames else 1, now)
+            self.next_revision += 1
+            frame = Frame(jpeg, self.frames[session].seq + 1 if session in self.frames else 1,
+                          now, self.next_revision)
             self.frames[session] = frame  # replace; never append a visual history
             return frame
 
@@ -203,7 +207,7 @@ async def systemone(body: SystemOneRequest, request: Request):
             answers[name] = answer(q, keys, probs)
             input_tokens += result.get("usage", {}).get("prompt_tokens", 0)
         current = await store.get(body.state_id)
-        if current.seq != frame.seq:
+        if current.revision != frame.revision:
             raise HTTPException(409, "New frame arrived during decision; retry")
         return {"model": body.model, "state_id": body.state_id, "seq": frame.seq,
                 "answers": answers, "usage": {"input_tokens": input_tokens, "output_tokens": 1 * len(answers)}}
