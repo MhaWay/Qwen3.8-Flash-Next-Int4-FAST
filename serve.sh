@@ -76,30 +76,35 @@ if [ "$BACKEND" = b12x ]; then
     HF_HOME="$HF_HOME" exec ./run-recipe.sh "$RECIPE" "${B12X[@]}" -- \
       --served-model-name "$SERVED_NAME" --max-num-seqs "$SEQS" --kv-cache-memory-bytes "$KV_BYTES" $EXTRA_ARGS
   fi
-  # HIDDEN_CAPTURE=1 -- no exec, so serve.sh keeps control after launching and can verify the patch applied. run-recipe.sh
-  # in detach returns when the container is starting; then poll for the read route (the only surface the patch adds). If a
-  # required anchor was missing (patch_b12x exits, or the router hook didn't fire), this fails clearly, with container logs.
-  HF_HOME="$HF_HOME" ./run-recipe.sh "$RECIPE" "${B12X[@]}" -- \
-    --served-model-name "$SERVED_NAME" --max-num-seqs "$SEQS" --kv-cache-memory-bytes "$KV_BYTES" $EXTRA_ARGS || {
-      echo "FATAL: run-recipe.sh exited non-zero with HIDDEN_CAPTURE=1 (a required vLLM patch anchor is likely absent)" >&2
-      docker logs --tail 100 "$CONTAINER" 2>&1 | tail -12 >&2 || true
-      exit 1
-    }
-  deadline=$(( $(date +%s) + ${READY_TIMEOUT:-360} )); attached=0
-  while [ "$(date +%s)" -lt "$deadline" ]; do
-    if curl -fsS "http://127.0.0.1:$PORT/health" >/dev/null 2>&1 \
-       && curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/flashnext/hidden_state/read" 2>/dev/null | grep -qE '^(400|401|403)$'; then
-      attached=1; break
+  # HIDDEN_CAPTURE=1 -- no exec, so serve.sh keeps control after launching and can verify the patch applied. Detached no
+  # matter how the caller invoked us: without -d this script would block on docker run before it could probe the route.
+  [ "$DETACH" = 1 ] || { B12X+=(-d); echo "  note: detached regardless of -d; stop later with 'docker stop $CONTAINER'"; }
+  # Then poll for the read route (the only surface the patch adds). If a required anchor was missing (patch_b12x exits,
+  # or the router hook didn't fire), this fails clearly, with container logs. The bare route (no query param) answers
+  # 422/400/404 as a mounted/absent signal: only 404 or a dead server mean NOT mounted -- any mount is proof, and 422 is
+  # what FastAPI itself returns when a required query param is missing, so it must count as mounted.
+  if ! HF_HOME="$HF_HOME" ./run-recipe.sh "$RECIPE" "${B12X[@]}" -- \
+       --served-model-name "$SERVED_NAME" --max-num-seqs "$SEQS" --kv-cache-memory-bytes "$KV_BYTES" $EXTRA_ARGS; then
+    echo "FATAL: run-recipe.sh exited non-zero with HIDDEN_CAPTURE=1 (a required vLLM patch anchor is likely absent)" >&2
+    docker logs --tail 100 "$CONTAINER" 2>&1 | tail -12 >&2 || true
+    exit 1
+  fi
+  deadline=$(( $(date +%s) + ${READY_TIMEOUT:-600} )); code=000
+  while :; do
+    if curl -fsS --max-time 5 "http://127.0.0.1:$PORT/health" >/dev/null 2>&1; then
+      code=$( { curl -s -o /dev/null --max-time 8 -w '%{http_code}' "http://127.0.0.1:$PORT/flashnext/hidden_state/read" 2>/dev/null; } || echo 000 )
+      [ "$code" != 000 ] && [ "$code" != 404 ] && break
     fi
+    [ "$(date +%s)" -lt "$deadline" ] || break
     sleep 3
   done
-  [ "$attached" = 1 ] || {
-    echo "FATAL: HIDDEN_CAPTURE=1 but the read route never appeared (api-server routers anchor missing, or worker extension cls not honored)" >&2
+  if [ "$code" = 404 ] || [ "$code" = 000 ]; then
+    echo "FATAL: HIDDEN_CAPTURE=1 but the read route never appeared (HTTP $code -- api-server routers anchor missing, or worker extension cls not honored)" >&2
     docker logs --tail 100 "$CONTAINER" 2>&1 | tail -12 >&2 || true
     docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
     exit 1
-  }
-  echo "  hidden-state capture ON: read route verified (HN_MAX_ENTRIES / HN_TTL_SECONDS default 1024 / 300s)"
+  fi
+  echo "  hidden-state capture ON: read route mounted (verified HTTP $code; HN_MAX_ENTRIES / HN_TTL_SECONDS default 1024 / 300s)"
 fi
 [ "$BACKEND" = classic ] || { echo "BACKEND must be auto, b12x or classic (got '$BACKEND')" >&2; exit 1; }
 
