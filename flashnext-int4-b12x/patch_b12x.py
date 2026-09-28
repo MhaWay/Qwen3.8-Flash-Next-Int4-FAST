@@ -178,6 +178,52 @@ edit(f"{fla}/chunk_delta_h.py",
      lambda s: once(s, "for num_warps in [2, 4]", f"for num_warps in [2]  # {MARK}:fla-warps fla#953"),
      "fla-warps", False)
 
+# 7. hidden-state capture hook --------------------------------------------------------------------------------------
+# Optional: installed in EVERY launch, but dormant (zero cost, inert) unless the serve command adds
+# --worker-extension-cls=vllm_hidden_state.HiddenStateExtension (serve.sh: HIDDEN_CAPTURE=1). The module is copied so the
+# extension's qualname resolves and so both the worker (capture + hidden_state_read) and the API (read route) import it.
+shutil.copy(os.path.join(MOD, "hidden_state.py"), f"{SP}/vllm_hidden_state.py")
+# runner: capture the end-of-prompt row once per request. Anchored on the FIRST of sample()'s two lines; the call is a
+# gated no-op when the extension is off, and disables itself permanently on any unexpected layout, so a wrong anchor can
+# never break serving and this stays optional (a bad build warns, the launch still goes).
+edit(f"{V}/v1/worker/gpu/model_runner.py",
+     lambda s: once(
+         s,
+         "    ) -> tuple[SamplerOutput, torch.Tensor, torch.Tensor]:\n        shard_metadata = None",
+         "    ) -> tuple[SamplerOutput, torch.Tensor, torch.Tensor]:\n"
+         f"        hn = getattr(self, \"_hn_on\", None)\n"
+         "        if hn is None:\n"
+         "            try:\n"
+         "                from vllm_hidden_state import active_for_extension as _hn_a\n"
+         "                hn = _hn_a(self.vllm_config.parallel_config.worker_extension_cls)\n"
+         "            except Exception:\n"
+         "                hn = False\n"
+         "            self._hn_on = hn\n"
+         "        if hn and hidden_states is not None:\n"
+         "            try:\n"
+         "                from vllm_hidden_state import capture_step\n"
+         "                capture_step(self, input_batch, hidden_states)\n"
+         "            except Exception:\n"
+         "                self._hn_on = False\n"
+         "        shard_metadata = None",
+     ),
+     "hidden-capture-runner", False)
+# API: a single read endpoint when (and only when) the feature is enabled by the worker-extension arg. No dev mode,
+# no general /collective_rpc, so the only extra surface is the one GET that returns one request's vector.
+edit(f"{V}/entrypoints/launchers/api_server/routers.py",
+     lambda s: once(
+         s,
+         "    register_vllm_serve_api_routers(app)\n",
+         "    register_vllm_serve_api_routers(app)\n"
+         "    if \"HiddenStateExtension\" in (getattr(args, \"worker_extension_cls\", \"\") or \"\"):\n"
+         "        try:\n"
+         "            from vllm_hidden_state import attach_read_route\n"
+         "            attach_read_route(app)\n"
+         "        except Exception as exc:  # classic / non-patched runtime: keep serving\n"
+         "            __import__(\"logging\").getLogger(\"vllm_hidden_state\").warning(\"read route not attached: %r\", exc)\n",
+     ),
+     "hidden-capture-route", False)
+
 print("patched: " + ", ".join(done) + ("" if not warn else " | WARNING (optional, skipped): " + "; ".join(warn)))
 if fatal:
     sys.exit("FATAL required patch failed: " + "; ".join(fatal))

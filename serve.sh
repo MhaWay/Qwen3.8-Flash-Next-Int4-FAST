@@ -40,6 +40,7 @@ HF_HOME="${HF_HOME:-$HOME/.cache/huggingface}"        # where the HF cache lives
 MODELS_DIR="${MODELS_DIR:-$HOME/models}"              # plain-folder location (local mode) + the small draft folder
 
 EXTRA_ARGS="${EXTRA_ARGS:-}"                          # anything else to append to the vLLM command line
+HIDDEN_CAPTURE="${HIDDEN_CAPTURE:-0}"                 # b12x opt-in: keep the end-of-prompt hidden state of served requests in worker RAM for 10 min; read with GET /flashnext/hidden_state/read?req_id=<chatcmpl-uuid>. 0 = route/capture not present, serving unchanged
 DOCKER_EXTRA_ARGS="${DOCKER_EXTRA_ARGS:-}"            # extra flags for docker run itself (bind mounts, -e variables)
 # <<< SETTINGS <<<
 # ════════════════════════════════════════════════════════════════════════
@@ -64,12 +65,41 @@ if [ "$BACKEND" = b12x ]; then
   docker image inspect "$B12X_IMAGE" >/dev/null 2>&1 || { echo "Image $B12X_IMAGE not found -- run ./setup.sh" >&2; exit 1; }
   [ "$DOWNLOAD_MODE" = cache ] || { echo "The b12x recipe reads the model from the Hugging Face cache (DOWNLOAD_MODE=cache)" >&2; exit 1; }
   B12X=(--solo -t "$B12X_IMAGE" --port "$PORT" --max-model-len "$CTX" --name "$CONTAINER"); [ "$DETACH" = 1 ] && B12X+=(-d)
+  # HIDDEN_CAPTURE=1 adds the opt-in worker extension. The recipe's mod installs the
+  # capture module; without this flag the patched hook never enters numpy, so OFF == untouched serving.
+  [ "$HIDDEN_CAPTURE" = 1 ] && EXTRA_ARGS="$EXTRA_ARGS --worker-extension-cls=vllm_hidden_state.HiddenStateExtension"
   echo "Serving $MODEL_REPO with Eugr's b12x stack ($B12X_IMAGE, recipe $B12X_RECIPE) -- ${CTX} ctx, KV $KV_BYTES on port $PORT"
   docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
   cd "$EUGR_DIR"
   # Arguments after -- are appended to the recipe's vllm command; vLLM keeps the last value of a repeated flag.
-  HF_HOME="$HF_HOME" exec ./run-recipe.sh "$RECIPE" "${B12X[@]}" -- \
-    --served-model-name "$SERVED_NAME" --max-num-seqs "$SEQS" --kv-cache-memory-bytes "$KV_BYTES" $EXTRA_ARGS
+  if [ "$HIDDEN_CAPTURE" != 1 ]; then
+    HF_HOME="$HF_HOME" exec ./run-recipe.sh "$RECIPE" "${B12X[@]}" -- \
+      --served-model-name "$SERVED_NAME" --max-num-seqs "$SEQS" --kv-cache-memory-bytes "$KV_BYTES" $EXTRA_ARGS
+  fi
+  # HIDDEN_CAPTURE=1 -- no exec, so serve.sh keeps control after launching and can verify the patch applied. run-recipe.sh
+  # in detach returns when the container is starting; then poll for the read route (the only surface the patch adds). If a
+  # required anchor was missing (patch_b12x exits, or the router hook didn't fire), this fails clearly, with container logs.
+  HF_HOME="$HF_HOME" ./run-recipe.sh "$RECIPE" "${B12X[@]}" -- \
+    --served-model-name "$SERVED_NAME" --max-num-seqs "$SEQS" --kv-cache-memory-bytes "$KV_BYTES" $EXTRA_ARGS || {
+      echo "FATAL: run-recipe.sh exited non-zero with HIDDEN_CAPTURE=1 (a required vLLM patch anchor is likely absent)" >&2
+      docker logs --tail 100 "$CONTAINER" 2>&1 | tail -12 >&2 || true
+      exit 1
+    }
+  deadline=$(( $(date +%s) + ${READY_TIMEOUT:-360} )); attached=0
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    if curl -fsS "http://127.0.0.1:$PORT/health" >/dev/null 2>&1 \
+       && curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/flashnext/hidden_state/read" 2>/dev/null | grep -qE '^(400|401|403)$'; then
+      attached=1; break
+    fi
+    sleep 3
+  done
+  [ "$attached" = 1 ] || {
+    echo "FATAL: HIDDEN_CAPTURE=1 but the read route never appeared (api-server routers anchor missing, or worker extension cls not honored)" >&2
+    docker logs --tail 100 "$CONTAINER" 2>&1 | tail -12 >&2 || true
+    docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
+    exit 1
+  }
+  echo "  hidden-state capture ON: read route verified (HN_MAX_ENTRIES / HN_TTL_SECONDS default 1024 / 300s)"
 fi
 [ "$BACKEND" = classic ] || { echo "BACKEND must be auto, b12x or classic (got '$BACKEND')" >&2; exit 1; }
 
