@@ -2,8 +2,9 @@
 """Compare question-conditioned end-of-prompt states for two letter images.
 
 Uses the same messages and decision prompt as visual_systemone.app.systemone.
-Only the per-request cache_salt differs, isolating prefix-cache reuse without
-changing any prompt tokens. Does not modify the server or require a restart.
+Omits logprobs (not needed for hidden-state comparison) because this pinned
+vLLM build can fail while formatting them. A unique per-request cache_salt
+isolates prefix reuse without changing prompt tokens. No restart is required.
 """
 
 import argparse
@@ -25,7 +26,7 @@ def make_prompt(state, question, first_option, second_option):
             f"A. {first_option}\nB. {second_option}\nAnswer with one letter only:")
 
 
-def capture(base, model, letter, image, option_ids, prompt):
+def capture(base, model, letter, image, prompt):
     encoded = "data:image/jpeg;base64," + base64.b64encode(image.read_bytes()).decode()
     request = {
         "model": model,
@@ -39,10 +40,6 @@ def capture(base, model, letter, image, option_ids, prompt):
         "chat_template_kwargs": {"enable_thinking": False},
         "max_tokens": 1,
         "temperature": 0,
-        "logprobs": True,
-        "top_logprobs": 1,
-        "logprob_token_ids": option_ids,
-        "return_tokens_as_token_ids": True,
         "cache_salt": secrets.token_hex(16),
     }
     reply = fetch_json(base + "/v1/chat/completions", request)
@@ -86,15 +83,7 @@ def main():
     prompt = make_prompt(state, question, first_option, second_option)
     print(f"Option A = {first_option}; option B = {second_option}")
     base = args.url.rstrip("/")
-    option_ids = []
-    for label in "AB":
-        ids = fetch_json(base + "/tokenize", {
-            "model": args.model, "prompt": label, "add_special_tokens": False,
-        })["tokens"]
-        if len(ids) != 1:
-            raise RuntimeError(f"Option label {label} must be one token")
-        option_ids.append(int(ids[0]))
-    data = [capture(base, args.model, label, path, option_ids, prompt)
+    data = [capture(base, args.model, label, path, prompt)
             for label, path in ((first_name, first_path), (second_name, second_path),
                                 (first_name, first_path), (second_name, second_path))]
     if len({tokens for _, tokens in data}) != 1:
