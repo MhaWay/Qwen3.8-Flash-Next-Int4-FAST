@@ -68,7 +68,9 @@ class Question(BaseModel):
 class SystemOneRequest(BaseModel):
     model: str = "qwen-visual-choice-v0"
     state: str = Field(max_length=2048)
-    state_id: str = Field(min_length=1, max_length=80)
+    # Omit or set null for text-only decisions. A supplied id still requires a
+    # current JPEG frame, preserving the existing session semantics.
+    state_id: str | None = Field(default=None, min_length=1, max_length=80)
     questions: dict[str, Question] = Field(min_length=1, max_length=4)
 
 
@@ -176,15 +178,18 @@ async def systemone(body: SystemOneRequest, request: Request):
     if body.model != "qwen-visual-choice-v0":
         raise HTTPException(400, "Unknown model")
     store: FrameStore = request.app.state.store
-    frame = await store.get(body.state_id)
+    frame = await store.get(body.state_id) if body.state_id is not None else None
     # One request per session: the image can change while Qwen is answering.
-    gate = request.app.state.gates.setdefault(body.state_id, asyncio.Lock())
+    gate = (request.app.state.gates.setdefault(body.state_id, asyncio.Lock())
+            if body.state_id is not None else asyncio.Lock())
     if gate.locked():
         raise HTTPException(429, "Previous decision still running")
     async with gate:
         client = request.app.state.client
         ids = await letter_ids(client, request.app)
-        encoded = "data:image/jpeg;base64," + base64.b64encode(frame.jpeg).decode()
+        image_content = ([{"type": "image_url", "image_url": {
+            "url": "data:image/jpeg;base64," + base64.b64encode(frame.jpeg).decode()}}]
+            if frame is not None else [])
         answers: dict[str, Any] = {}
         input_tokens = 0
         for name, q in body.questions.items():
@@ -194,8 +199,7 @@ async def systemone(body: SystemOneRequest, request: Request):
             result = await upstream(client, "/v1/chat/completions", {
                 "model": MODEL, "messages": [
                     {"role": "system", "content": "Evaluate the current image. Select exactly one listed action or answer."},
-                    {"role": "user", "content": [{"type": "image_url", "image_url": {"url": encoded}},
-                                               {"type": "text", "text": prompt}]}],
+                    {"role": "user", "content": image_content + [{"type": "text", "text": prompt}]}],
                 "chat_template_kwargs": {"enable_thinking": False},
                 "max_tokens": 1, "temperature": 0, "logprobs": True, "top_logprobs": 1,
                 "logprob_token_ids": ids[:len(keys)], "return_tokens_as_token_ids": True})
@@ -206,10 +210,12 @@ async def systemone(body: SystemOneRequest, request: Request):
                 raise HTTPException(502, "Candidate logprobs unavailable; stop the controller") from exc
             answers[name] = answer(q, keys, probs)
             input_tokens += result.get("usage", {}).get("prompt_tokens", 0)
-        current = await store.get(body.state_id)
-        if current.revision != frame.revision:
-            raise HTTPException(409, "New frame arrived during decision; retry")
-        return {"model": body.model, "state_id": body.state_id, "seq": frame.seq,
+        if frame is not None:
+            current = await store.get(body.state_id)
+            if current.revision != frame.revision:
+                raise HTTPException(409, "New frame arrived during decision; retry")
+        return {"model": body.model, "state_id": body.state_id,
+                "seq": frame.seq if frame is not None else None,
                 "answers": answers, "usage": {"input_tokens": input_tokens, "output_tokens": 1 * len(answers)}}
 
 
