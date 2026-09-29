@@ -57,6 +57,7 @@ def _ib(n=1, is_pf=None, computed=None, ub=None, plen=None,
         cu_num_logits_np=np.asarray(cu, dtype=np.int64),
         # the real InputBatch keeps this as a device tensor of row indices
         logits_indices=torch.arange(rows, dtype=torch.long),
+        query_start_loc_np=np.concatenate([[0], np.cumsum(np.asarray(plen, dtype=np.int64))]),
         req_ids=list(req_ids),
     )
     return ib
@@ -195,6 +196,46 @@ def test_off_is_inert():
     print("flag off is inert OK")
 
 
+def test_bounded_full_prompt_trace():
+    previous = hs.TRACE_ON
+    hs.TRACE_ON = True
+    try:
+        r = new_runner()
+        ib = _ib(plen=[4], ub=[4], n_logits=[1])
+        rows = fake_hidden(4, 16)
+        hs.capture_step(r, ib, rows)
+        trace = hs.get_trace_store(r).read(ib.req_ids[0])
+        assert trace["shape"] == [4, 16]
+        assert torch.equal(decoded(trace).reshape(4, 16), rows)
+        rows.zero_()
+        assert bool(decoded(hs.get_trace_store(r).read(ib.req_ids[0])).sum()), "trace aliased live rows"
+
+        batched = new_runner()
+        batch = _ib(n=2, plen=[4, 6], ub=[4, 6])
+        batch.logits_indices = torch.tensor([3, 9], dtype=torch.long)
+        values = fake_hidden(10, 16)
+        hs.capture_step(batched, batch, values)
+        for i, (start, end) in enumerate(((0, 4), (4, 10))):
+            got = hs.get_trace_store(batched).read(batch.req_ids[i])
+            assert torch.equal(decoded(got).reshape(end - start, 16), values[start:end]), "batch rows crossed requests"
+
+        chunk = _ib(plen=[8], ub=[4], n_logits=[1])
+        chunk.req_ids = ["chatcmpl-abcdef0123456788"]
+        hs.capture_step(r, chunk, fake_hidden(4, 16))
+        assert hs.get_trace_store(r).read(chunk.req_ids[0]) is None
+        cache = _ib(is_pf=[False], computed=[4], plen=[4], ub=[5])
+        cache.req_ids = ["chatcmpl-abcdef0123456789"]
+        hs.capture_step(r, cache, fake_hidden(4, 16))
+        assert hs.get_trace_store(r).read(cache.req_ids[0]) is None
+        large = _ib(plen=[hs.TRACE_MAX_TOKENS + 1], ub=[hs.TRACE_MAX_TOKENS + 1])
+        large.req_ids = ["chatcmpl-abcdef0123456790"]
+        hs.capture_step(r, large, fake_hidden(hs.TRACE_MAX_TOKENS + 1, 16))
+        assert hs.get_trace_store(r).read(large.req_ids[0]) is None
+    finally:
+        hs.TRACE_ON = previous
+    print("bounded cold-prefill trace preserves all prompt rows OK")
+
+
 def test_unexpected_layout_fails_safe():
     r = new_runner()
     ib = _ib()
@@ -215,5 +256,6 @@ if __name__ == "__main__":
     test_cache_hit_then_decode_no_touch()
     test_chunked_prefill_only_at_the_end()
     test_off_is_inert()
+    test_bounded_full_prompt_trace()
     test_unexpected_layout_fails_safe()
     print("ALL CPU TESTS PASSED")
