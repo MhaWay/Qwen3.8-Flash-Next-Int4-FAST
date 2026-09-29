@@ -23,7 +23,7 @@ MODEL = os.environ.get("VISUAL_MODEL", os.environ.get("FLASHNEXT_SYSTEMONE_MODEL
 MAX_BYTES = 300_000
 MAX_SESSIONS = 8
 FRAME_TTL = 10.0
-LETTERS = "ABCDEFGH"
+LETTERS = "ABCDEFGHIJKLMNOPQRST"
 
 
 @dataclass(frozen=True)
@@ -87,7 +87,7 @@ def choices(q: Question) -> tuple[list[str], list[str]]:
     else:
         raise HTTPException(400, "Invalid criteria for question type")
     if not 2 <= len(keys) <= len(LETTERS) or any(not x for x in descriptions):
-        raise HTTPException(400, "Use 2-8 nonempty options")
+        raise HTTPException(400, "Use 2-20 nonempty options")
     return keys, descriptions
 
 
