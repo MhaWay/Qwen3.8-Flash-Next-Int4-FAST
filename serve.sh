@@ -41,6 +41,7 @@ MODELS_DIR="${MODELS_DIR:-$HOME/models}"              # plain-folder location (l
 
 EXTRA_ARGS="${EXTRA_ARGS:-}"                          # anything else to append to the vLLM command line
 HIDDEN_CAPTURE="${HIDDEN_CAPTURE:-0}"                 # b12x opt-in: keep the end-of-prompt hidden state of served requests for 5 min; read with GET /flashnext/hidden_state/read?req_id=<chatcmpl-uuid>. 0 = route/capture not present, serving unchanged
+HN_TRACE_CAPTURE="${HN_TRACE_CAPTURE:-0}"             # b12x diagnostic, only with HIDDEN_CAPTURE=1: keep full prompt rows for cold single-step prefills <=512 tokens, at most 8 requests for 120s
 DOCKER_EXTRA_ARGS="${DOCKER_EXTRA_ARGS:-}"            # extra flags for docker run itself (bind mounts, -e variables)
 # <<< SETTINGS <<<
 # ════════════════════════════════════════════════════════════════════════
@@ -77,6 +78,7 @@ if [ "$BACKEND" = b12x ]; then
       }
     done
     B12X+=(-e FLASHNEXT_HIDDEN_REQUIRED=1)
+    [ "$HN_TRACE_CAPTURE" = 1 ] && B12X+=(-e HN_TRACE_CAPTURE=1)
     EXTRA_ARGS="$EXTRA_ARGS --worker-extension-cls=vllm_hidden_state.HiddenStateExtension"
   fi
   echo "Serving $MODEL_REPO with Eugr's b12x stack ($B12X_IMAGE, recipe $B12X_RECIPE) -- ${CTX} ctx, KV $KV_BYTES on port $PORT"
