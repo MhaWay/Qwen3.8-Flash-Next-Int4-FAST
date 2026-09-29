@@ -16,9 +16,8 @@ mod folder and patch in every node).
 
 Capture rule -- exactly one vector per request, at END OF PROMPT BEFORE DECODE:
 record only at a step that ENDS that request's prompt (is_prefilling and
-num_computed + scheduled >= prefill_len: covers plain, chunked, and the
-last-token recompute step that vLLM must also run after a full prefix-cache
-hit). Purely-decode steps record nothing; the draft/MTP path is never touched.
+num_computed + scheduled >= prefill_len: covers plain and chunked prefills).
+Purely-decode steps record nothing; the draft/MTP path is never touched.
 A permanently-active flag stops capture on an unexpected build layout so
 serving is immune to capture bugs.
 
@@ -207,23 +206,17 @@ def _capture(st, ib, hidden_states, runner=None) -> None:
 
     One vector per request, captured BEFORE decode:
       * the step that FINISHES a live (possibly chunked) prefill: is_prefilling
-        and computed + this step >= prefill_len -- the last chunk's logits row;
-      * the FIRST step of a request whose whole prompt arrived via prefix-cache
-        hits: not prefilling and computed == prefill_len. vLLM still runs one
-        forward for the last prompt token on such requests; that step's logits
-        row is the same "residual at the last prompt position" the prefill
-        capture sees (the position is identical), so both paths converge on the
-        same vector -- which is what the CLM probe wants.
-    Decode/spec-decode steps: computed > prefill_len, or is_prefilling and the
-    chunk does not reach prefill_len -> nothing is stored; the draft path runs
-    completely outside sample().
+        and computed + this step >= prefill_len -- the last chunk's logits row.
+    A full prefix-cache hit must recompute a prompt token while is_prefilling;
+    if computed == prefill_len and is_prefilling is false, the sampler kernel
+    may already overwrite its input with the first generated token. That row
+    must never be reported as the end-of-prompt state. Decode/spec-decode and
+    incomplete prefill steps store nothing.
 
     The row taken is hidden_states[logits_indices[cu_num_logits[i+1] - 1]] for
     request i: the last position of that request's logits window for the step.
     """
     import numpy as np
-    import torch
-
     n = ib.num_reqs
     if n == 0:
         return
@@ -232,18 +225,17 @@ def _capture(st, ib, hidden_states, runner=None) -> None:
     ub = np.asarray(ib.seq_lens_cpu_upper_bound[:n])
     plen = np.asarray(ib.prefill_len_np[:n])
 
-    finishing = is_pf & (ub >= plen)
-    after = (~is_pf) & (computed == plen)
-    want = finishing | after
+    want = is_pf & (computed < plen) & (ub >= plen)
     if not bool(np.any(want)):
         return
     cu = np.asarray(ib.cu_num_logits_np, dtype=np.int64)[: n + 1]
-    rows = torch.as_tensor(cu[1:] - 1, dtype=torch.long,
-                           device=hidden_states.device)
-    sel = hidden_states[ib.logits_indices[rows]]
     for i, req in enumerate(ib.req_ids[:n]):
-        if want[i]:
-            st.put(req, sel[i])
+        if not want[i]:
+            continue
+        if cu[i + 1] <= cu[i]:
+            continue  # this request has no logits row in the current step
+        row = int(cu[i + 1] - 1)
+        st.put(req, hidden_states[ib.logits_indices[row]])
     if TRACE_ON and runner is not None:
         trace_store = get_trace_store(runner)
         if not trace_store.disabled:
