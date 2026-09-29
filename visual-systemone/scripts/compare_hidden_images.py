@@ -110,6 +110,16 @@ def trace_summary(first, second, repeat, text_only=False):
     print("Least repeatable positions (position: A/B, A/A):", ", ".join(f"{i}: {ab[i]:.4g}, {aa[i]:.4g}" for i in noisy))
 
 
+def pooled_trace(trace, positions):
+    rows, n = trace
+    if any(i < 0 or i >= n for i in positions):
+        raise RuntimeError(f"Pooling positions {positions} outside prompt length {n}")
+    return array.array("f", (
+        sum(rows[i * 2560 + col] for i in positions) / len(positions)
+        for col in range(2560)
+    ))
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("first", type=Path, nargs="?", help="first JPEG")
@@ -119,9 +129,18 @@ def main():
     parser.add_argument("--fresh-cache", action="store_true", help="use a unique cache_salt per request")
     parser.add_argument("--describe", action="store_true", help="generate a short description at Qwen's non-thinking temperature 0.7")
     parser.add_argument("--trace", action="store_true", help="compare every prompt hidden row from the optional trace route")
+    parser.add_argument("--pool-positions", help="diagnostic: average comma-separated prompt positions (requires --trace)")
     parser.add_argument("--url", default="http://127.0.0.1:8000")
     parser.add_argument("--model", default="qwen3.8-flash-next-a5b")
     args = parser.parse_args()
+    if args.pool_positions and not args.trace:
+        parser.error("--pool-positions requires --trace")
+    try:
+        pool_positions = [int(x) for x in args.pool_positions.split(",")] if args.pool_positions else []
+    except ValueError:
+        parser.error("--pool-positions must contain comma-separated integers")
+    if args.pool_positions and (not pool_positions or len(set(pool_positions)) != len(pool_positions)):
+        parser.error("--pool-positions must contain unique positions")
     if args.text_only:
         if args.first is not None or args.second is not None:
             parser.error("Do not pass image paths with --text-only")
@@ -147,6 +166,10 @@ def main():
     repeat = capture(base, args.model, args.first, prompt, args.fresh_cache, args.describe, args.trace)
     if args.trace:
         trace_summary(first, second, repeat, args.text_only)
+        if pool_positions:
+            ab = distance(pooled_trace(first, pool_positions), pooled_trace(second, pool_positions))
+            aa = distance(pooled_trace(first, pool_positions), pooled_trace(repeat, pool_positions))
+            print(f"Pooled positions {pool_positions}: A/B cosine={ab[0]:.8g}, relative_l2={ab[1]:.8g}; A/A cosine={aa[0]:.8g}, relative_l2={aa[1]:.8g}")
     else:
         ab = distance(first[0], second[0])
         aa = distance(first[0], repeat[0])
