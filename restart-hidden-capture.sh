@@ -161,6 +161,17 @@ hs="$(printf '%s' "$capture" | grep -oE '"hidden_size"[[:space:]]*:[[:space:]]*[
 log "captured req_id=$REQ_ID hidden_size=${hs:-unknown}"
 [ "$hs" = 2560 ] || fail "hidden-size-mismatch"
 
-verdict "restart=ok container=$CONTAINER route=live req=$REQ_ID hidden_size=${hs:-unknown} log=$LOG"
+trace_status=off
+if [ "${HN_TRACE_CAPTURE:-0}" = 1 ]; then
+  log "smoke: reading the full cold-prefill trace for the same request"
+  trace="$(curl -fsS --max-time 30 "http://$API_HOST:$API_PORT/flashnext/hidden_state/trace?req_id=$REQ_ID" 2>>"$LOG" || true)"
+  [ -n "$trace" ] || fail "trace-empty"
+  trace_rows="$(printf '%s' "$trace" | python3 -c 'import json,sys; s=json.load(sys.stdin).get("shape", []); print(s[0] if len(s)==2 and 0 < s[0] <= 512 and s[1]==2560 else "")' 2>>"$LOG" || true)"
+  [ -n "$trace_rows" ] || fail "trace-shape"
+  trace_status=live
+  log "trace confirmed: $trace_rows prompt rows x 2560"
+fi
+
+verdict "restart=ok container=$CONTAINER route=live trace=$trace_status req=$REQ_ID hidden_size=${hs:-unknown} log=$LOG"
 log "DONE. Everything outside this container (gateway, recipe, MTP) is untouched. To turn OFF: unset HIDDEN_CAPTURE and run ./serve.sh -d"
 exit 0
