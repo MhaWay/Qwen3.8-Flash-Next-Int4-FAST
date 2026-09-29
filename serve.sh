@@ -42,6 +42,7 @@ MODELS_DIR="${MODELS_DIR:-$HOME/models}"              # plain-folder location (l
 EXTRA_ARGS="${EXTRA_ARGS:-}"                          # anything else to append to the vLLM command line
 HIDDEN_CAPTURE="${HIDDEN_CAPTURE:-0}"                 # b12x opt-in: keep the end-of-prompt hidden state of served requests for 5 min; read with GET /flashnext/hidden_state/read?req_id=<chatcmpl-uuid>. 0 = route/capture not present, serving unchanged
 HN_TRACE_CAPTURE="${HN_TRACE_CAPTURE:-0}"             # b12x diagnostic, only with HIDDEN_CAPTURE=1: keep full prompt rows for cold single-step prefills <=512 tokens, at most 8 requests for 120s
+SYSTEMONE_IN_VLLM="${SYSTEMONE_IN_VLLM:-0}"             # b12x opt-in: mount /v1/systemone and /v1/vision/... on the existing vLLM port
 DOCKER_EXTRA_ARGS="${DOCKER_EXTRA_ARGS:-}"            # extra flags for docker run itself (bind mounts, -e variables)
 # <<< SETTINGS <<<
 # ════════════════════════════════════════════════════════════════════════
@@ -81,15 +82,26 @@ if [ "$BACKEND" = b12x ]; then
     [ "$HN_TRACE_CAPTURE" = 1 ] && B12X+=(-e HN_TRACE_CAPTURE=1)
     EXTRA_ARGS="$EXTRA_ARGS --worker-extension-cls=vllm_hidden_state.HiddenStateExtension"
   fi
+  if [ "$SYSTEMONE_IN_VLLM" = 1 ]; then
+    cmp -s ./flashnext-int4-b12x/patch_b12x.py "$EUGR_DIR/mods/flashnext-int4-b12x/patch_b12x.py" || {
+      echo "FATAL: Eugr's b12x patch is stale; run ./eugr-setup.sh --sync-only before restarting" >&2
+      exit 1
+    }
+    cmp -s ./visual-systemone/src/visual_systemone/app.py "$EUGR_DIR/mods/flashnext-int4-b12x/systemone_api.py" || {
+      echo "FATAL: Eugr's SystemOne module is stale or missing; run ./eugr-setup.sh --sync-only before restarting" >&2
+      exit 1
+    }
+    B12X+=(-e FLASHNEXT_SYSTEMONE_REQUIRED=1 -e "VISUAL_MODEL=$SERVED_NAME" -e "VISUAL_VLLM_URL=http://127.0.0.1:$PORT")
+  fi
   echo "Serving $MODEL_REPO with Eugr's b12x stack ($B12X_IMAGE, recipe $B12X_RECIPE) -- ${CTX} ctx, KV $KV_BYTES on port $PORT"
   docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
   cd "$EUGR_DIR"
   # Arguments after -- are appended to the recipe's vllm command; vLLM keeps the last value of a repeated flag.
-  if [ "$HIDDEN_CAPTURE" != 1 ]; then
+  if [ "$HIDDEN_CAPTURE" != 1 ] && [ "$SYSTEMONE_IN_VLLM" != 1 ]; then
     HF_HOME="$HF_HOME" exec ./run-recipe.sh "$RECIPE" "${B12X[@]}" -- \
       --served-model-name "$SERVED_NAME" --max-num-seqs "$SEQS" --kv-cache-memory-bytes "$KV_BYTES" $EXTRA_ARGS
   fi
-  # HIDDEN_CAPTURE=1 -- no exec, so serve.sh keeps control after launching and can verify the patch applied. Detached no
+  # Opt-in API routes -- no exec, so serve.sh keeps control after launching and can verify the patch applied. Detached no
   # matter how the caller invoked us: without -d this script would block on docker run before it could probe the route.
   [ "$DETACH" = 1 ] || { B12X+=(-d); echo "  note: detached regardless of -d; stop later with 'docker stop $CONTAINER'"; }
   # Then poll for the read route (the only surface the patch adds). If a required anchor was missing (patch_b12x exits,
@@ -97,29 +109,50 @@ if [ "$BACKEND" = b12x ]; then
   # req_id with 400 or 422. Other responses, including server errors, are not proof of a working route.
   if ! HF_HOME="$HF_HOME" ./run-recipe.sh "$RECIPE" "${B12X[@]}" -- \
        --served-model-name "$SERVED_NAME" --max-num-seqs "$SEQS" --kv-cache-memory-bytes "$KV_BYTES" $EXTRA_ARGS; then
-    echo "FATAL: run-recipe.sh exited non-zero with HIDDEN_CAPTURE=1 (a required vLLM patch anchor is likely absent)" >&2
+    echo "FATAL: run-recipe.sh exited non-zero with opt-in API routes (a required vLLM patch anchor may be absent)" >&2
     docker logs --tail 100 "$CONTAINER" 2>&1 | tail -12 >&2 || true
     exit 1
   fi
   deadline=$(( $(date +%s) + ${READY_TIMEOUT:-600} )); code=000
-  while :; do
-    if curl -fsS --max-time 5 "http://127.0.0.1:$PORT/health" >/dev/null 2>&1; then
-      code=$(curl -s -o /dev/null --max-time 8 -w '%{http_code}' "http://127.0.0.1:$PORT/flashnext/hidden_state/read" 2>/dev/null) || code=000
-      { [ "$code" = 400 ] || [ "$code" = 422 ]; } && break
+  if [ "$HIDDEN_CAPTURE" = 1 ]; then
+    while :; do
+      if curl -fsS --max-time 5 "http://127.0.0.1:$PORT/health" >/dev/null 2>&1; then
+        code=$(curl -s -o /dev/null --max-time 8 -w '%{http_code}' "http://127.0.0.1:$PORT/flashnext/hidden_state/read" 2>/dev/null) || code=000
+        { [ "$code" = 400 ] || [ "$code" = 422 ]; } && break
+      fi
+      [ "$(date +%s)" -lt "$deadline" ] || break
+      sleep 3
+    done
+    if [ "$code" != 400 ] && [ "$code" != 422 ]; then
+      echo "FATAL: hidden-state read route missing (HTTP $code)" >&2
+      docker logs --tail 100 "$CONTAINER" 2>&1 | tail -12 >&2 || true
+      docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
+      exit 1
     fi
-    [ "$(date +%s)" -lt "$deadline" ] || break
-    sleep 3
-  done
-  if [ "$code" != 400 ] && [ "$code" != 422 ]; then
-    echo "FATAL: HIDDEN_CAPTURE=1 but the read route did not reject a missing req_id as expected (HTTP $code)" >&2
-    docker logs --tail 100 "$CONTAINER" 2>&1 | tail -12 >&2 || true
-    docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
-    exit 1
+    echo "  hidden-state capture ON: read route mounted (verified HTTP $code; HN_MAX_ENTRIES / HN_TTL_SECONDS default 1024 / 300s)"
   fi
-  echo "  hidden-state capture ON: read route mounted (verified HTTP $code; HN_MAX_ENTRIES / HN_TTL_SECONDS default 1024 / 300s)"
+  if [ "$SYSTEMONE_IN_VLLM" = 1 ]; then
+    code=000
+    while :; do
+      if curl -fsS --max-time 5 "http://127.0.0.1:$PORT/health" >/dev/null 2>&1; then
+        code=$(curl -s -o /dev/null --max-time 8 -w '%{http_code}' -H 'Content-Type: application/json' -d '{}' "http://127.0.0.1:$PORT/v1/systemone" 2>/dev/null) || code=000
+        [ "$code" = 422 ] && break
+      fi
+      [ "$(date +%s)" -lt "$deadline" ] || break
+      sleep 3
+    done
+    if [ "$code" != 422 ]; then
+      echo "FATAL: SystemOne route missing or unresponsive (HTTP $code)" >&2
+      docker logs --tail 100 "$CONTAINER" 2>&1 | tail -12 >&2 || true
+      docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
+      exit 1
+    fi
+    echo "  SystemOne ON: /v1/systemone and /v1/vision/{state_id}/frame share port $PORT with /v1/chat/completions"
+  fi
   exit 0
 fi
 [ "$BACKEND" = classic ] || { echo "BACKEND must be auto, b12x or classic (got '$BACKEND')" >&2; exit 1; }
+[ "$SYSTEMONE_IN_VLLM" = 0 ] || { echo "SYSTEMONE_IN_VLLM=1 requires BACKEND=b12x" >&2; exit 1; }
 
 # Mount every directory at the SAME absolute path it has on the host. The Hugging Face cache stores a snapshot as
 # symlinks into ../../blobs, so identical paths inside and outside the container are what keeps them resolving.
