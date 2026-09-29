@@ -193,6 +193,7 @@ if os.environ.get("FLASHNEXT_HIDDEN_REQUIRED") == "1":
              s,
              "    ) -> tuple[SamplerOutput, torch.Tensor, torch.Tensor]:\n        shard_metadata = None",
              "    ) -> tuple[SamplerOutput, torch.Tensor, torch.Tensor]:\n"
+             f"        # {MARK}:hidden-capture-runner\n"
              f"        hn = getattr(self, \"_hn_on\", None)\n"
              "        if hn is None:\n"
              "            try:\n"
@@ -217,6 +218,7 @@ if os.environ.get("FLASHNEXT_HIDDEN_REQUIRED") == "1":
              s,
              "    register_vllm_serve_api_routers(app)\n",
              "    register_vllm_serve_api_routers(app)\n"
+             f"    # {MARK}:hidden-capture-route\n"
              "    if \"HiddenStateExtension\" in (getattr(args, \"worker_extension_cls\", \"\") or \"\"):\n"
              "        try:\n"
              "            from vllm_hidden_state import attach_read_route\n"
