@@ -21,6 +21,11 @@ last-token recompute step that vLLM must also run after a full prefix-cache
 hit). Purely-decode steps record nothing; the draft/MTP path is never touched.
 A permanently-active flag stops capture on an unexpected build layout so
 serving is immune to capture bugs.
+
+Optional HN_TRACE_CAPTURE=1 also clones all decoder hidden rows of a cold,
+single-step prefill with at most HN_TRACE_MAX_TOKENS tokens. This diagnostic
+trace is served at /flashnext/hidden_state/trace; it is not an image-only
+embedding and it is never collected for chunked or cache-hit prefills.
 """
 
 import base64
@@ -36,6 +41,13 @@ import time
 # Raise only while a probe needs a longer/wider window (8192 entries are ~40 MiB of bf16 values).
 MAX_ENTRIES = int(os.environ.get("HN_MAX_ENTRIES", "1024"))
 TTL_SECONDS = float(os.environ.get("HN_TTL_SECONDS", "300"))
+# Diagnostic only: bounded full-prompt capture. 512 x 2560 x 2 bytes is
+# 2.5 MiB per request in GPU memory; at most 8 requests are retained for 120s.
+# Hard ceilings protect the server if someone sets larger values accidentally.
+TRACE_ON = os.environ.get("HN_TRACE_CAPTURE") == "1"
+TRACE_MAX_TOKENS = min(2048, max(1, int(os.environ.get("HN_TRACE_MAX_TOKENS", "512"))))
+TRACE_MAX_ENTRIES = min(16, max(1, int(os.environ.get("HN_TRACE_MAX_ENTRIES", "8"))))
+TRACE_TTL_SECONDS = min(300.0, max(1.0, float(os.environ.get("HN_TRACE_TTL_SECONDS", "120"))))
 _MARKER = "HiddenStateExtension"
 
 # The pinned server emits chatcmpl-<16 hex> (observed in live responses).
@@ -159,6 +171,13 @@ def get_store(runner) -> _Store:
     return st
 
 
+def get_trace_store(runner) -> _Store:
+    st = getattr(runner, "_hn_trace_store", None)
+    if st is None:
+        st = runner._hn_trace_store = _Store(TRACE_MAX_ENTRIES, TRACE_TTL_SECONDS)
+    return st
+
+
 def capture_step(runner, input_batch, hidden_states) -> None:
     """The per-step hook the runner patch installs (see patch_b12x.py). Returns
     instantly unless the extension is active; disables itself permanently and
@@ -172,7 +191,7 @@ def capture_step(runner, input_batch, hidden_states) -> None:
     if st.disabled:
         return
     try:
-        _capture(st, input_batch, hidden_states)
+        _capture(st, input_batch, hidden_states, runner)
     except Exception:  # noqa: BLE001
         if not st.disabled:
             st.disabled = True
@@ -183,7 +202,7 @@ def capture_step(runner, input_batch, hidden_states) -> None:
             )
 
 
-def _capture(st, ib, hidden_states) -> None:
+def _capture(st, ib, hidden_states, runner=None) -> None:
     """Store the end-of-prompt row for every request whose prompt this step ends.
 
     One vector per request, captured BEFORE decode:
@@ -225,6 +244,43 @@ def _capture(st, ib, hidden_states) -> None:
     for i, req in enumerate(ib.req_ids[:n]):
         if want[i]:
             st.put(req, sel[i])
+    if TRACE_ON and runner is not None:
+        trace_store = get_trace_store(runner)
+        if not trace_store.disabled:
+            try:
+                _capture_trace(trace_store, ib, hidden_states, is_pf, computed, ub, plen)
+            except Exception:  # never disable the ordinary one-vector capture
+                trace_store.disabled = True
+                import logging
+
+                logging.getLogger("vllm_hidden_state").warning(
+                    "hidden-state prompt trace disabled: unexpected layout", exc_info=True
+                )
+
+
+def _capture_trace(st, ib, hidden_states, is_pf, computed, ub, plen) -> None:
+    """Keep every forward row of a single-step cold prefill, in prompt order.
+
+    Skip chunked and cache-hit requests: their full prompt is not simultaneously
+    in hidden_states. Never include generated or speculative draft positions.
+    Query boundaries are the same batch row boundaries used to build positions.
+    """
+    import numpy as np
+
+    n = ib.num_reqs
+    boundaries = np.asarray(ib.query_start_loc_np[: n + 1], dtype=np.int64)
+    if len(boundaries) != n + 1:
+        raise ValueError("query boundaries missing")
+    for i, req_id in enumerate(ib.req_ids[:n]):
+        start, end = int(boundaries[i]), int(boundaries[i + 1])
+        length = int(plen[i])
+        if not (is_pf[i] and computed[i] == 0 and ub[i] >= length):
+            continue
+        if not (0 < length <= TRACE_MAX_TOKENS and end - start == length):
+            continue
+        if not (0 <= start < end <= hidden_states.shape[0]):
+            raise ValueError("prompt rows out of bounds")
+        st.put(req_id, hidden_states[start:end])
 
 
 class HiddenStateExtension:
@@ -240,6 +296,11 @@ class HiddenStateExtension:
         if st is None:
             return None
         return st.read(req_id)
+
+    def hidden_state_trace_read(self, req_id: str):
+        """Read the optional, bounded [prompt_tokens, hidden_size] trace."""
+        st = getattr(getattr(self, "model_runner", None), "_hn_trace_store", None)
+        return st.read(req_id) if st is not None else None
 
 
 def attach_read_route(app, engine_selector=None):
@@ -274,5 +335,17 @@ def attach_read_route(app, engine_selector=None):
             )
         return got
 
-    app.include_router(router)
+    if TRACE_ON:
+        @router.get("/flashnext/hidden_state/trace")
+        async def _trace(req_id: str, request: Request):
+            if _canon(req_id) is None:
+                raise HTTPException(status_code=400, detail="invalid req_id")
+            engine = (engine_selector(request) if engine_selector
+                      else request.app.state.engine_client)
+            results = await engine.collective_rpc("hidden_state_trace_read", args=(req_id,))
+            got = next((r for r in results if r is not None), None)
+            if got is None:
+                raise HTTPException(status_code=404, detail="no full cold-prefill trace for req_id")
+            return got
 
+    app.include_router(router)
