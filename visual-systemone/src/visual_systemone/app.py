@@ -11,6 +11,7 @@ import os
 import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Any, Literal
 
 import httpx
@@ -18,7 +19,7 @@ from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field
 
 VLLM_URL = os.environ.get("VISUAL_VLLM_URL", "http://127.0.0.1:8000").rstrip("/")
-MODEL = os.environ.get("VISUAL_MODEL", "qwen3.8-flash-next-a5b")
+MODEL = os.environ.get("VISUAL_MODEL", os.environ.get("FLASHNEXT_SYSTEMONE_MODEL", "qwen3.8-flash-next-a5b"))
 MAX_BYTES = 300_000
 MAX_SESSIONS = 8
 FRAME_TTL = 10.0
@@ -154,12 +155,16 @@ async def add_frame(state_id: str, request: Request):
     jpeg = await request.body()
     if not 4 <= len(jpeg) <= MAX_BYTES or not jpeg.startswith(b"\xff\xd8") or not jpeg.endswith(b"\xff\xd9"):
         raise HTTPException(413, "Invalid or oversized JPEG")
-    frame = await request.app.state.store.put(state_id, jpeg)
+    frame = await _service(request.app).store.put(state_id, jpeg)
     return {"state_id": state_id, "seq": frame.seq}
 
 
-async def letter_ids(client: httpx.AsyncClient, app: FastAPI) -> list[int]:
-    if app.state.letter_ids is None:
+def _service(parent: FastAPI):
+    return parent.state if parent is app else parent.state.systemone_service
+
+
+async def letter_ids(client: httpx.AsyncClient, state) -> list[int]:
+    if state.letter_ids is None:
         ids = []
         for letter in LETTERS:
             tokens = (await upstream(client, "/tokenize", {
@@ -169,24 +174,37 @@ async def letter_ids(client: httpx.AsyncClient, app: FastAPI) -> list[int]:
             ids.append(int(tokens[0]))
         if len(set(ids)) != len(ids):
             raise HTTPException(502, "Labels have overlapping token IDs")
-        app.state.letter_ids = ids
-    return app.state.letter_ids
+        state.letter_ids = ids
+    return state.letter_ids
 
 
 @app.post("/v1/systemone")
 async def systemone(body: SystemOneRequest, request: Request):
     if body.model != "qwen-visual-choice-v0":
         raise HTTPException(400, "Unknown model")
-    store: FrameStore = request.app.state.store
+    state = _service(request.app)
+    store: FrameStore = state.store
     frame = await store.get(body.state_id) if body.state_id is not None else None
     # One request per session: the image can change while Qwen is answering.
-    gate = (request.app.state.gates.setdefault(body.state_id, asyncio.Lock())
+    gate = (state.gates.setdefault(body.state_id, asyncio.Lock())
             if body.state_id is not None else asyncio.Lock())
     if gate.locked():
         raise HTTPException(429, "Previous decision still running")
     async with gate:
-        client = request.app.state.client
-        ids = await letter_ids(client, request.app)
+        # Standalone gateway owns a persistent client in its lifespan. When
+        # attached to vLLM's FastAPI app, use a scoped loopback client instead:
+        # vLLM owns that app's lifespan and we must not replace it.
+        client = (request.app.state.client if request.app is app else
+                  getattr(request.app.state, "systemone_client", None))
+        if client is None:
+            async with httpx.AsyncClient(base_url=VLLM_URL, timeout=httpx.Timeout(90, connect=5), trust_env=False) as scoped:
+                return await _evaluate(body, request, frame, store, scoped)
+        return await _evaluate(body, request, frame, store, client)
+
+
+async def _evaluate(body: SystemOneRequest, request: Request, frame: Frame | None,
+                    store: FrameStore, client: httpx.AsyncClient):
+        ids = await letter_ids(client, _service(request.app))
         image_content = ([{"type": "image_url", "image_url": {
             "url": "data:image/jpeg;base64," + base64.b64encode(frame.jpeg).decode()}}]
             if frame is not None else [])
@@ -217,6 +235,22 @@ async def systemone(body: SystemOneRequest, request: Request):
         return {"model": body.model, "state_id": body.state_id,
                 "seq": frame.seq if frame is not None else None,
                 "answers": answers, "usage": {"input_tokens": input_tokens, "output_tokens": 1 * len(answers)}}
+
+
+def attach_to_vllm(parent: FastAPI) -> None:
+    """Register two paths on the existing vLLM API process and port.
+
+    No extra Qwen engine, proxy listener, or replacement of vLLM's lifespan.
+    This is called by the pinned b12x router patch before the server starts.
+    """
+    paths = {"/v1/systemone", "/v1/vision/{state_id}/frame"}
+    if any(route.path in paths for route in parent.routes):
+        raise RuntimeError("SystemOne route collision")
+    parent.state.systemone_service = SimpleNamespace(store=FrameStore(), gates={}, letter_ids=None)
+    parent.add_api_route("/v1/vision/{state_id}/frame", add_frame, methods=["POST"],
+                         name="systemone_frame")
+    parent.add_api_route("/v1/systemone", systemone, methods=["POST"],
+                         name="systemone_decision")
 
 
 def main():
