@@ -29,6 +29,7 @@ fi
 for f in "$MOD" "${RECIPES[@]}"; do
   [ -e "$f" ] || { echo "Missing $f in $(pwd) -- run 'git pull' in this folder first." >&2; exit 1; }
 done
+[ -f visual-systemone/src/visual_systemone/app.py ] || { echo "Missing SystemOne gateway module" >&2; exit 1; }
 
 if [ "$SYNC_ONLY" != 1 ]; then
   command -v docker >/dev/null || { echo "docker is not installed" >&2; exit 1; }
@@ -45,6 +46,7 @@ fi
 
 rm -rf "$EUGR_DIR/mods/$MOD"
 cp -r "$MOD" "$EUGR_DIR/mods/$MOD"
+cp visual-systemone/src/visual_systemone/app.py "$EUGR_DIR/mods/$MOD/systemone_api.py"
 cp "${RECIPES[@]}" "$EUGR_DIR/recipes/"
 
 [ "$SYNC_ONLY" = 1 ] && echo "Mod and recipes synchronized; Docker image and Eugr checkout untouched." || echo "Image: $B12X_IMAGE = $B12X_IMAGE_PIN"
