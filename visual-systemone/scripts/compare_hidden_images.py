@@ -114,6 +114,7 @@ def main():
     parser.add_argument("first", type=Path, nargs="?", help="first JPEG")
     parser.add_argument("second", type=Path, nargs="?", help="different JPEG")
     parser.add_argument("--text-only", action="store_true", help="repeat one text prompt three times without images")
+    parser.add_argument("--text-fill", type=int, default=0, help="with --text-only, prepend this many simple words to match a longer prompt")
     parser.add_argument("--fresh-cache", action="store_true", help="use a unique cache_salt per request")
     parser.add_argument("--describe", action="store_true", help="generate a short description at Qwen's non-thinking temperature 0.7")
     parser.add_argument("--trace", action="store_true", help="compare every prompt hidden row from the optional trace route")
@@ -123,7 +124,11 @@ def main():
     if args.text_only:
         if args.first is not None or args.second is not None:
             parser.error("Do not pass image paths with --text-only")
+        if not 0 <= args.text_fill <= 400:
+            parser.error("--text-fill must be between 0 and 400")
     else:
+        if args.text_fill:
+            parser.error("--text-fill requires --text-only")
         if args.first is None or args.second is None:
             parser.error("Pass two JPEG paths or use --text-only")
         if args.first.resolve() == args.second.resolve():
@@ -132,6 +137,8 @@ def main():
             if not image.is_file():
                 parser.error(f"Missing image: {image}")
     prompt = "Describe the visible shape in one short sentence."
+    if args.text_fill:
+        prompt = " ".join("object" for _ in range(args.text_fill)) + "\n" + prompt
     base = args.url.rstrip("/")
     print("prefix_cache:", "isolated per request" if args.fresh_cache else "normal")
     first = capture(base, args.model, args.first, prompt, args.fresh_cache, args.describe, args.trace)
