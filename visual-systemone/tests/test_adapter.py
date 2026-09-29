@@ -93,6 +93,43 @@ class TextOnlyVLLM(FakeVLLM):
             "usage": {"prompt_tokens": 25}})
 
 
+class TwentyOptionsVLLM:
+    async def aclose(self):
+        pass
+
+    async def post(self, path, json):
+        if path == "/tokenize":
+            return FakeResponse({"tokens": [ord(json["prompt"])]})
+        assert path == "/v1/chat/completions"
+        ids = json["logprob_token_ids"]
+        assert ids == list(range(ord("A"), ord("T") + 1))
+        assert "T. Action 19" in json["messages"][1]["content"][0]["text"]
+        rows = [{"token": f"token_id:{token_id}",
+                 "logprob": 0.0 if token_id == ord("T") else -10.0}
+                for token_id in ids]
+        return FakeResponse({"choices": [{"logprobs": {"content": [
+            {"top_logprobs": rows}]}}], "usage": {"prompt_tokens": 100}})
+
+
+def test_twenty_options_end_to_end_and_twenty_one_rejected():
+    with TestClient(app) as client:
+        app.state.client = TwentyOptionsVLLM()
+        criteria = {f"action_{i}": f"Action {i}" for i in range(20)}
+        body = {"state": "Choose next action", "questions": {"action": {
+            "type": "choice", "instructions": "Which action?", "criteria": criteria}}}
+        response = client.post("/v1/systemone", json=body)
+        assert response.status_code == 200, response.text
+        selected = response.json()["answers"]["action"]
+        assert selected["choice"] == "action_19"
+        assert len(selected["probabilities"]) == 20
+        assert sum(selected["probabilities"].values()) == pytest.approx(1)
+
+        body["questions"]["action"]["criteria"]["action_20"] = "Action 20"
+        rejected = client.post("/v1/systemone", json=body)
+        assert rejected.status_code == 400
+        assert "2-20" in rejected.text
+
+
 class FrameReplacedAfterExpiry(FakeVLLM):
     async def post(self, path, json):
         if path == "/v1/chat/completions":
@@ -195,7 +232,7 @@ def test_vllm_api_hosts_chat_and_systemone_on_one_port():
                                    "criteria": {"forward": "Forward", "stop": "Stop"}}}})
         assert visual.status_code == 200, visual.text
         assert visual.json()["answers"]["move"]["choice"] == "forward"
-    assert parent.state.systemone_service.letter_ids == [65, 66, 67, 68, 69, 70, 71, 72]
+    assert parent.state.systemone_service.letter_ids == list(range(65, 85))
 
 
 def test_vllm_route_collision_fails_before_serving():
