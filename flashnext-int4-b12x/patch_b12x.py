@@ -228,6 +228,27 @@ if os.environ.get("FLASHNEXT_HIDDEN_REQUIRED") == "1":
          ),
          "hidden-capture-route", True)
 
+# 8. Optional SystemOne routes on the SAME API server and port as chat.
+# eugr-setup.sh copies the gateway module into this mod; the vLLM API process
+# imports it only when explicitly enabled. No model runner changes are needed.
+if os.environ.get("FLASHNEXT_SYSTEMONE_REQUIRED") == "1":
+    shutil.copy(os.path.join(MOD, "systemone_api.py"), f"{SP}/vllm_systemone.py")
+    try:
+        sys.path.insert(0, SP)
+        __import__("vllm_systemone")  # fail before model load if FastAPI/httpx is missing
+    except Exception as exc:
+        fatal.append(f"systemone-module: {exc}")
+    edit(f"{V}/entrypoints/launchers/api_server/routers.py",
+         lambda s: once(
+             s,
+             "    register_vllm_serve_api_routers(app)\n",
+             "    register_vllm_serve_api_routers(app)\n"
+             f"    # {MARK}:systemone-route\n"
+             "    from vllm_systemone import attach_to_vllm\n"
+             "    attach_to_vllm(app)\n",
+         ),
+         "systemone-route", True)
+
 print("patched: " + ", ".join(done) + ("" if not warn else " | WARNING (optional, skipped): " + "; ".join(warn)))
 if fatal:
     sys.exit("FATAL required patch failed: " + "; ".join(fatal))
