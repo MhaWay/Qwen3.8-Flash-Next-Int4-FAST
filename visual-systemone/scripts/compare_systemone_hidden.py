@@ -74,8 +74,8 @@ def main():
         first_name, second_name = "A-clear", "A-ambiguous"
         first_path, second_path = Path("systemone-A-clear.jpg"), Path("systemone-A.jpg")
         state = "Diagnostic image"
-        question = "Is a letter visible in the image?"
-        first_option, second_option = "A letter is visible", "No letter is visible"
+        question = "È visibile una A?"
+        first_option, second_option = "Sì, è visibile una A", "No, non è visibile una A"
     else:
         first_name, second_name = "B", "D"
         first_path, second_path = args.b, args.d
