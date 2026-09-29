@@ -10,6 +10,7 @@ import array
 import base64
 import json
 import math
+import secrets
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -28,18 +29,23 @@ def fetch_json(url, data=None):
         raise RuntimeError(f"{url}: HTTP {exc.code}: {exc.read(300).decode(errors='replace')}") from exc
 
 
-def capture(base, model, path, prompt):
+def capture(base, model, path, prompt, fresh_cache=False):
     content = [{"type": "text", "text": prompt}]
     if path is not None:
         image = "data:image/jpeg;base64," + base64.b64encode(path.read_bytes()).decode()
         content.insert(0, {"type": "image_url", "image_url": {"url": image}})
-    reply = fetch_json(base + "/v1/chat/completions", {
+    request = {
         "model": model,
         "messages": [{"role": "user", "content": content}],
         "max_tokens": 1,
         "temperature": 0,
         "chat_template_kwargs": {"enable_thinking": False},
-    })
+    }
+    if fresh_cache:
+        # Each request has its own first-block hash, so KV blocks from earlier
+        # requests cannot be reused. This does not change the prompt tokens.
+        request["cache_salt"] = secrets.token_hex(16)
+    reply = fetch_json(base + "/v1/chat/completions", request)
     req_id = reply["id"]
     route = base + "/flashnext/hidden_state/read?" + urllib.parse.urlencode({"req_id": req_id})
     result = fetch_json(route)
@@ -67,6 +73,7 @@ def main():
     parser.add_argument("first", type=Path, nargs="?", help="first JPEG")
     parser.add_argument("second", type=Path, nargs="?", help="different JPEG")
     parser.add_argument("--text-only", action="store_true", help="repeat one text prompt three times without images")
+    parser.add_argument("--fresh-cache", action="store_true", help="use a unique cache_salt per request")
     parser.add_argument("--url", default="http://127.0.0.1:8000")
     parser.add_argument("--model", default="qwen3.8-flash-next-a5b")
     args = parser.parse_args()
@@ -83,9 +90,10 @@ def main():
                 parser.error(f"Missing image: {image}")
     prompt = "Describe the visible shape in one short sentence."
     base = args.url.rstrip("/")
-    first = capture(base, args.model, args.first, prompt)
-    second = capture(base, args.model, args.second, prompt)
-    repeat = capture(base, args.model, args.first, prompt)
+    print("prefix_cache:", "isolated per request" if args.fresh_cache else "normal")
+    first = capture(base, args.model, args.first, prompt, args.fresh_cache)
+    second = capture(base, args.model, args.second, prompt, args.fresh_cache)
+    repeat = capture(base, args.model, args.first, prompt, args.fresh_cache)
     ab = distance(first, second)
     aa = distance(first, repeat)
     print(f"A vs B: cosine_distance={ab[0]:.8g}, relative_l2={ab[1]:.8g}")
