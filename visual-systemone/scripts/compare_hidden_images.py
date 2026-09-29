@@ -11,6 +11,7 @@ import base64
 import json
 import math
 import secrets
+import statistics
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -29,7 +30,7 @@ def fetch_json(url, data=None):
         raise RuntimeError(f"{url}: HTTP {exc.code}: {exc.read(300).decode(errors='replace')}") from exc
 
 
-def capture(base, model, path, prompt, fresh_cache=False, describe=False):
+def capture(base, model, path, prompt, fresh_cache=False, describe=False, trace=False):
     content = [{"type": "text", "text": prompt}]
     if path is not None:
         image = "data:image/jpeg;base64," + base64.b64encode(path.read_bytes()).decode()
@@ -49,16 +50,19 @@ def capture(base, model, path, prompt, fresh_cache=False, describe=False):
         request["cache_salt"] = secrets.token_hex(16)
     reply = fetch_json(base + "/v1/chat/completions", request)
     req_id = reply["id"]
-    route = base + "/flashnext/hidden_state/read?" + urllib.parse.urlencode({"req_id": req_id})
+    endpoint = "trace" if trace else "read"
+    route = base + "/flashnext/hidden_state/" + endpoint + "?" + urllib.parse.urlencode({"req_id": req_id})
     result = fetch_json(route)
-    if result["dtype"] != "float32" or result["shape"] != [2560]:
+    shape = result["shape"]
+    valid_shape = (len(shape) == 2 and 0 < shape[0] <= 2048 and shape[1] == 2560) if trace else shape == [2560]
+    if result["dtype"] != "float32" or not valid_shape:
         raise RuntimeError(f"Unexpected vector format: {result['dtype']} {result['shape']}")
     vector = array.array("f")
     vector.frombytes(base64.b64decode(result["b64"], validate=True))
-    if len(vector) != 2560 or not all(math.isfinite(value) for value in vector):
+    if len(vector) != math.prod(shape) or not all(math.isfinite(value) for value in vector):
         raise RuntimeError("Invalid hidden vector")
     print(f"{path.name if path else 'text-only'}: {req_id}, shape={result['shape']}, dtype={result['dtype']}, output={reply['choices'][0]['message']['content']!r}")
-    return vector
+    return vector, (shape[0] if trace else 1)
 
 
 def distance(a, b):
@@ -70,6 +74,28 @@ def distance(a, b):
     return cos, relative_l2
 
 
+def trace_summary(first, second, repeat):
+    a, na = first
+    b, nb = second
+    again, nr = repeat
+    if na != nr:
+        raise RuntimeError(f"Same image changed prompt length: {na} vs {nr}")
+    print(f"Prompt positions: A={na}, B={nb}, A-repeat={nr}; hidden_size=2560")
+    if na != nb:
+        print("A/B token counts differ: positions cannot be aligned directly; compare equal-size images.")
+        return
+    ab, aa = [], []
+    for i in range(na):
+        lo, hi = i * 2560, (i + 1) * 2560
+        ab.append(distance(a[lo:hi], b[lo:hi])[0])
+        aa.append(distance(a[lo:hi], again[lo:hi])[0])
+    print(f"Per-position cosine distance: A/B mean={statistics.mean(ab):.6g} median={statistics.median(ab):.6g}; A/A mean={statistics.mean(aa):.6g} median={statistics.median(aa):.6g}")
+    interesting = sorted(range(na), key=lambda i: ab[i] - aa[i], reverse=True)[:8]
+    noisy = sorted(range(na), key=lambda i: aa[i], reverse=True)[:8]
+    print("Largest image-specific differences (position: A/B, A/A):", ", ".join(f"{i}: {ab[i]:.4g}, {aa[i]:.4g}" for i in interesting))
+    print("Least repeatable positions (position: A/B, A/A):", ", ".join(f"{i}: {ab[i]:.4g}, {aa[i]:.4g}" for i in noisy))
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("first", type=Path, nargs="?", help="first JPEG")
@@ -77,6 +103,7 @@ def main():
     parser.add_argument("--text-only", action="store_true", help="repeat one text prompt three times without images")
     parser.add_argument("--fresh-cache", action="store_true", help="use a unique cache_salt per request")
     parser.add_argument("--describe", action="store_true", help="generate a short description at Qwen's non-thinking temperature 0.7")
+    parser.add_argument("--trace", action="store_true", help="compare every prompt hidden row from the optional trace route")
     parser.add_argument("--url", default="http://127.0.0.1:8000")
     parser.add_argument("--model", default="qwen3.8-flash-next-a5b")
     args = parser.parse_args()
@@ -94,13 +121,16 @@ def main():
     prompt = "Describe the visible shape in one short sentence."
     base = args.url.rstrip("/")
     print("prefix_cache:", "isolated per request" if args.fresh_cache else "normal")
-    first = capture(base, args.model, args.first, prompt, args.fresh_cache, args.describe)
-    second = capture(base, args.model, args.second, prompt, args.fresh_cache, args.describe)
-    repeat = capture(base, args.model, args.first, prompt, args.fresh_cache, args.describe)
-    ab = distance(first, second)
-    aa = distance(first, repeat)
-    print(f"A vs B: cosine_distance={ab[0]:.8g}, relative_l2={ab[1]:.8g}")
-    print(f"A vs A: cosine_distance={aa[0]:.8g}, relative_l2={aa[1]:.8g}")
+    first = capture(base, args.model, args.first, prompt, args.fresh_cache, args.describe, args.trace)
+    second = capture(base, args.model, args.second, prompt, args.fresh_cache, args.describe, args.trace)
+    repeat = capture(base, args.model, args.first, prompt, args.fresh_cache, args.describe, args.trace)
+    if args.trace:
+        trace_summary(first, second, repeat)
+    else:
+        ab = distance(first[0], second[0])
+        aa = distance(first[0], repeat[0])
+        print(f"A vs B: cosine_distance={ab[0]:.8g}, relative_l2={ab[1]:.8g}")
+        print(f"A vs A: cosine_distance={aa[0]:.8g}, relative_l2={aa[1]:.8g}")
     print("A vs A is a repeatability control; compare it with A vs B. No automatic threshold is assumed.")
 
 
