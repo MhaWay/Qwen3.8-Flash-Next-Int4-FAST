@@ -87,7 +87,7 @@ def distance(a, b):
     return cos, relative_l2
 
 
-def trace_summary(first, second, repeat):
+def trace_summary(first, second, repeat, text_only=False):
     a, na = first
     b, nb = second
     again, nr = repeat
@@ -105,7 +105,8 @@ def trace_summary(first, second, repeat):
     print(f"Per-position cosine distance: A/B mean={statistics.mean(ab):.6g} median={statistics.median(ab):.6g}; A/A mean={statistics.mean(aa):.6g} median={statistics.median(aa):.6g}")
     interesting = sorted(range(na), key=lambda i: ab[i] - aa[i], reverse=True)[:8]
     noisy = sorted(range(na), key=lambda i: aa[i], reverse=True)[:8]
-    print("Largest image-specific differences (position: A/B, A/A):", ", ".join(f"{i}: {ab[i]:.4g}, {aa[i]:.4g}" for i in interesting))
+    label = "Largest between-request differences" if text_only else "Largest image-specific differences"
+    print(f"{label} (position: A/B, A/A):", ", ".join(f"{i}: {ab[i]:.4g}, {aa[i]:.4g}" for i in interesting))
     print("Least repeatable positions (position: A/B, A/A):", ", ".join(f"{i}: {ab[i]:.4g}, {aa[i]:.4g}" for i in noisy))
 
 
@@ -145,7 +146,7 @@ def main():
     second = capture(base, args.model, args.second, prompt, args.fresh_cache, args.describe, args.trace)
     repeat = capture(base, args.model, args.first, prompt, args.fresh_cache, args.describe, args.trace)
     if args.trace:
-        trace_summary(first, second, repeat)
+        trace_summary(first, second, repeat, args.text_only)
     else:
         ab = distance(first[0], second[0])
         aa = distance(first[0], repeat[0])
