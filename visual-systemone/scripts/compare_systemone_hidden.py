@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compare question-conditioned end-of-prompt states for B, D, B, D.
+"""Compare question-conditioned end-of-prompt states for two letter images.
 
 Uses the same messages and decision prompt as visual_systemone.app.systemone.
 Only the per-request cache_salt differs, isolating prefix-cache reuse without
@@ -20,11 +20,12 @@ from compare_hidden_images import distance, fetch_json
 STATE = "Classify the uppercase letter visible in the image."
 QUESTION = "Which uppercase letter is visible?"
 SYSTEM = "Evaluate the current image. Select exactly one listed action or answer."
-PROMPT = (f"Current objective and memory: {STATE}\nQuestion: {QUESTION}\nOptions:\n"
-          "A. The letter B\nB. The letter D\nAnswer with one letter only:")
+def make_prompt(state, question, first_option, second_option):
+    return (f"Current objective and memory: {state}\nQuestion: {question}\nOptions:\n"
+            f"A. {first_option}\nB. {second_option}\nAnswer with one letter only:")
 
 
-def capture(base, model, letter, image, option_ids):
+def capture(base, model, letter, image, option_ids, prompt):
     encoded = "data:image/jpeg;base64," + base64.b64encode(image.read_bytes()).decode()
     request = {
         "model": model,
@@ -32,7 +33,7 @@ def capture(base, model, letter, image, option_ids):
             {"role": "system", "content": SYSTEM},
             {"role": "user", "content": [
                 {"type": "image_url", "image_url": {"url": encoded}},
-                {"type": "text", "text": PROMPT},
+                {"type": "text", "text": prompt},
             ]},
         ],
         "chat_template_kwargs": {"enable_thinking": False},
@@ -66,9 +67,24 @@ def main():
     parser.add_argument("--model", default="qwen3.8-flash-next-a5b")
     parser.add_argument("--b", type=Path, default=Path("systemone-B-clear.jpg"))
     parser.add_argument("--d", type=Path, default=Path("systemone-D-clear.jpg"))
+    parser.add_argument("--ambiguous-a", action="store_true",
+                        help="compare the old ambiguous symbol with the clear A using the original question")
     args = parser.parse_args()
-    if not args.b.is_file() or not args.d.is_file():
-        parser.error("B and D JPEG files must exist")
+    if args.ambiguous_a:
+        first_name, second_name = "A-clear", "A-ambiguous"
+        first_path, second_path = Path("systemone-A-clear.jpg"), Path("systemone-A.jpg")
+        state = "Diagnostic image"
+        question = "Is a letter visible in the image?"
+        first_option, second_option = "A letter is visible", "No letter is visible"
+    else:
+        first_name, second_name = "B", "D"
+        first_path, second_path = args.b, args.d
+        state, question = STATE, QUESTION
+        first_option, second_option = "The letter B", "The letter D"
+    if not first_path.is_file() or not second_path.is_file():
+        parser.error(f"JPEG files must exist: {first_path}, {second_path}")
+    prompt = make_prompt(state, question, first_option, second_option)
+    print(f"Option A = {first_option}; option B = {second_option}")
     base = args.url.rstrip("/")
     option_ids = []
     for label in "AB":
@@ -78,13 +94,16 @@ def main():
         if len(ids) != 1:
             raise RuntimeError(f"Option label {label} must be one token")
         option_ids.append(int(ids[0]))
-    data = [capture(base, args.model, label, path, option_ids)
-            for label, path in (("B", args.b), ("D", args.d), ("B", args.b), ("D", args.d))]
+    data = [capture(base, args.model, label, path, option_ids, prompt)
+            for label, path in ((first_name, first_path), (second_name, second_path),
+                                (first_name, first_path), (second_name, second_path))]
     if len({tokens for _, tokens in data}) != 1:
         raise RuntimeError("Prompt token counts differ; do not compare positions")
-    b, d, b_repeat, d_repeat = (item[0] for item in data)
-    for name, a, other in (("B/D", b, d), ("B/B", b, b_repeat),
-                           ("D/D", d, d_repeat), ("D/B", d_repeat, b_repeat)):
+    first, second, first_repeat, second_repeat = (item[0] for item in data)
+    for name, a, other in ((f"{first_name}/{second_name}", first, second),
+                           (f"{first_name}/{first_name}", first, first_repeat),
+                           (f"{second_name}/{second_name}", second, second_repeat),
+                           (f"{second_name}/{first_name}", second_repeat, first_repeat)):
         cosine, relative_l2 = distance(a, other)
         print(f"{name}: cosine_distance={cosine:.8g}, relative_l2={relative_l2:.8g}")
     print("These are end-of-prompt states conditioned on the same SystemOne question.")
