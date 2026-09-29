@@ -29,7 +29,7 @@ def fetch_json(url, data=None):
         raise RuntimeError(f"{url}: HTTP {exc.code}: {exc.read(300).decode(errors='replace')}") from exc
 
 
-def capture(base, model, path, prompt, fresh_cache=False):
+def capture(base, model, path, prompt, fresh_cache=False, describe=False):
     content = [{"type": "text", "text": prompt}]
     if path is not None:
         image = "data:image/jpeg;base64," + base64.b64encode(path.read_bytes()).decode()
@@ -37,10 +37,12 @@ def capture(base, model, path, prompt, fresh_cache=False):
     request = {
         "model": model,
         "messages": [{"role": "user", "content": content}],
-        "max_tokens": 1,
-        "temperature": 0,
+        "max_tokens": 96 if describe else 1,
+        "temperature": 0.7 if describe else 0,
         "chat_template_kwargs": {"enable_thinking": False},
     }
+    if describe:
+        request.update({"top_p": 0.8, "top_k": 20, "presence_penalty": 1.5})
     if fresh_cache:
         # Each request has its own first-block hash, so KV blocks from earlier
         # requests cannot be reused. This does not change the prompt tokens.
@@ -74,6 +76,7 @@ def main():
     parser.add_argument("second", type=Path, nargs="?", help="different JPEG")
     parser.add_argument("--text-only", action="store_true", help="repeat one text prompt three times without images")
     parser.add_argument("--fresh-cache", action="store_true", help="use a unique cache_salt per request")
+    parser.add_argument("--describe", action="store_true", help="generate a short description at Qwen's non-thinking temperature 0.7")
     parser.add_argument("--url", default="http://127.0.0.1:8000")
     parser.add_argument("--model", default="qwen3.8-flash-next-a5b")
     args = parser.parse_args()
@@ -91,9 +94,9 @@ def main():
     prompt = "Describe the visible shape in one short sentence."
     base = args.url.rstrip("/")
     print("prefix_cache:", "isolated per request" if args.fresh_cache else "normal")
-    first = capture(base, args.model, args.first, prompt, args.fresh_cache)
-    second = capture(base, args.model, args.second, prompt, args.fresh_cache)
-    repeat = capture(base, args.model, args.first, prompt, args.fresh_cache)
+    first = capture(base, args.model, args.first, prompt, args.fresh_cache, args.describe)
+    second = capture(base, args.model, args.second, prompt, args.fresh_cache, args.describe)
+    repeat = capture(base, args.model, args.first, prompt, args.fresh_cache, args.describe)
     ab = distance(first, second)
     aa = distance(first, repeat)
     print(f"A vs B: cosine_distance={ab[0]:.8g}, relative_l2={ab[1]:.8g}")
