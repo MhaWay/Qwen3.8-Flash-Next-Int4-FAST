@@ -2,9 +2,11 @@ import asyncio
 from dataclasses import replace
 
 import pytest
+import httpx
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from visual_systemone.app import FrameStore, app, distribution
+from visual_systemone.app import FrameStore, app, attach_to_vllm, distribution
 
 
 JPEG = b"\xff\xd8visual-test\xff\xd9"
@@ -165,3 +167,73 @@ def test_expired_frame_replacement_during_decision_returns_conflict():
                 "move": {"type": "choice", "instructions": "Move?",
                          "criteria": {"forward": "Forward", "stop": "Stop"}}}})
         assert response.status_code == 409
+
+
+def test_vllm_api_hosts_chat_and_systemone_on_one_port():
+    parent = FastAPI()
+
+    @parent.post("/v1/chat/completions")
+    async def chat():
+        return {"choices": [{"message": {"content": "chat works"}}]}
+
+    attach_to_vllm(parent)
+    parent.state.systemone_client = TextOnlyVLLM()
+    with TestClient(parent) as client:
+        assert client.post("/v1/chat/completions").status_code == 200
+        result = client.post("/v1/systemone", json={"state": "The customer was billed twice.",
+            "questions": {"team": {"type": "choice", "instructions": "Which category?",
+                                   "criteria": {"billing": "Billing", "other": "Other"}}}})
+        assert result.status_code == 200, result.text
+        assert result.json()["answers"]["team"]["choice"] == "billing"
+        upload = client.post("/v1/vision/minecraft/frame", content=JPEG,
+                             headers={"Content-Type": "image/jpeg"})
+        assert upload.status_code == 200
+        assert parent.state.systemone_service.store.frames["minecraft"].jpeg == JPEG
+        parent.state.systemone_client = FakeVLLM()
+        visual = client.post("/v1/systemone", json={"state_id": "minecraft", "state": "Look at the frame.",
+            "questions": {"move": {"type": "choice", "instructions": "Move?",
+                                   "criteria": {"forward": "Forward", "stop": "Stop"}}}})
+        assert visual.status_code == 200, visual.text
+        assert visual.json()["answers"]["move"]["choice"] == "forward"
+    assert parent.state.systemone_service.letter_ids == [65, 66, 67, 68, 69, 70, 71, 72]
+
+
+def test_vllm_route_collision_fails_before_serving():
+    parent = FastAPI()
+
+    @parent.post("/v1/systemone")
+    async def already_registered():
+        return {}
+
+    with pytest.raises(RuntimeError, match="collision"):
+        attach_to_vllm(parent)
+
+
+def test_systemone_calls_chat_on_its_own_asgi_app():
+    parent = FastAPI()
+
+    @parent.post("/tokenize")
+    async def tokenize(body: dict):
+        return {"tokens": [ord(body["prompt"])]}
+
+    @parent.post("/v1/chat/completions")
+    async def chat(body: dict):
+        assert len(body["messages"][1]["content"]) == 1  # text-only
+        return {"choices": [{"logprobs": {"content": [{"top_logprobs": [
+            {"token": "token_id:65", "logprob": -0.1},
+            {"token": "token_id:66", "logprob": -2.1}]}]}}],
+            "usage": {"prompt_tokens": 25}}
+
+    attach_to_vllm(parent)
+    # ASGITransport simulates loopback on one server without binding another
+    # port or spawning a model.
+    async def run():
+        transport = httpx.ASGITransport(app=parent)
+        async with httpx.AsyncClient(transport=transport, base_url="http://self") as upstream:
+            parent.state.systemone_client = upstream
+            response = await upstream.post("/v1/systemone", json={"state": "A customer was billed twice.",
+                "questions": {"team": {"type": "choice", "instructions": "Which category?",
+                                       "criteria": {"billing": "Billing", "other": "Other"}}}})
+            assert response.status_code == 200, response.text
+            assert response.json()["answers"]["team"]["choice"] == "billing"
+    asyncio.run(run())
