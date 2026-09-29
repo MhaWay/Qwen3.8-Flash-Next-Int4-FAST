@@ -158,21 +158,36 @@ def test_last_window_row_per_request():
     print("last logits-window row OK")
 
 
-def test_cache_hit_then_decode_no_touch():
+def test_decode_after_full_prompt_does_not_capture():
     r = new_runner()
     ib = _ib(n=1, is_pf=[False], computed=[32], plen=[32], ub=[32], n_logits=[1])
     hidden = fake_hidden(1, 16)
     hs.capture_step(r, ib, hidden)
     st = hs.get_store(r)
+    assert st.read(ib.req_ids[0]) is None, "first generated-token row mislabeled as prompt"
+    # Last-token recompute, if needed on a cache hit, is still a prefill.
+    recompute = _ib(n=1, is_pf=[True], computed=[31], plen=[32], ub=[32],
+                    n_logits=[1], req_ids=ib.req_ids)
+    hs.capture_step(r, recompute, hidden)
     first = decoded(st.read(ib.req_ids[0]))
-    assert bool(first.abs().sum()), "cache-hit first step not captured"
-    # first decode step on this request: not prefilling, computed past prompt -> capture
-    # nothing; stored prompt vector untouched.
+    # First decode step must not change the prompt vector.
     ib2 = _ib(n=1, is_pf=[False], computed=[33], plen=[32], ub=[33], n_logits=[1],
               req_ids=ib.req_ids)
     hs.capture_step(r, ib2, torch.zeros_like(hidden))
     assert torch.equal(decoded(st.read(ib.req_ids[0])), first), "decode changed the prompt vector"
-    print("cache hit captured, decode leaves it alone OK")
+    print("decode excluded, last-token prefill captured OK")
+
+
+def test_request_without_logits_does_not_steal_another_row():
+    r = new_runner()
+    ib = _ib(n=2, is_pf=[True, True], computed=[0, 0],
+             plen=[10, 12], ub=[10, 12], n_logits=[0, 1])
+    hidden = fake_hidden(1, 16)
+    hs.capture_step(r, ib, hidden)
+    st = hs.get_store(r)
+    assert st.read(ib.req_ids[0]) is None, "empty logits window captured another request's row"
+    assert torch.equal(decoded(st.read(ib.req_ids[1])), hidden[0])
+    print("empty logits window cannot borrow a row OK")
 
 
 def test_chunked_prefill_only_at_the_end():
@@ -253,7 +268,8 @@ if __name__ == "__main__":
     test_ttl_and_lru()
     test_keeps_prompt_vector_against_later_mutation()
     test_last_window_row_per_request()
-    test_cache_hit_then_decode_no_touch()
+    test_decode_after_full_prompt_does_not_capture()
+    test_request_without_logits_does_not_steal_another_row()
     test_chunked_prefill_only_at_the_end()
     test_off_is_inert()
     test_bounded_full_prompt_trace()
