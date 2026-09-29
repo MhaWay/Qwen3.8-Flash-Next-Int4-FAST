@@ -136,11 +136,11 @@ done
 log "health = 200 OK"
 
 # serve.sh already proved the route exists; this is an independent second look: a bare request without
-# req_id must NOT be 404 (200/422/400 all mean FastAPI owns the path and it registered).
+# req_id must return 400 or 422 when the route validates its required parameter.
 code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 8 "http://$API_HOST:$API_PORT/flashnext/hidden_state/read?" 2>/dev/null)" || code=000
 log "bare GET /flashnext/hidden_state/read -> HTTP $code"
-[ "$code" != 404 ] && [ "$code" != 000 ] || fail "route-404"
-log "read route confirmed (not a 404)"
+{ [ "$code" = 400 ] || [ "$code" = 422 ]; } || fail "route-http-$code"
+log "read route confirmed (missing req_id rejected)"
 
 log "smoke: one chat completion, then read back its captured vector"
 RESP="$(curl -fsS --max-time 180 "http://$API_HOST:$API_PORT/v1/chat/completions" \
