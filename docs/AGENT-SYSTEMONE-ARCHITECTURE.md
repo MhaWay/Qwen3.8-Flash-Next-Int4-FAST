@@ -6,15 +6,17 @@ Stato: progetto architetturale per `feature/visual-systemone`, 2026-09-29. **Obi
 
 ```text
 Sorgente evento / osservazione
-    -> Orchestratore: obiettivo, memoria breve, stato, azioni ammesse, scadenza
-        -> SystemOne :8088 per una scelta tipizzata
-        -> Qwen chat :8000 per pianificazione, spiegazione o uso flessibile di tool
+    -> Orchestratore esterno: obiettivo, stato, azioni ammesse, scadenza
+        -> :8000/v1/systemone per una scelta tipizzata
+        -> :8000/v1/chat/completions per pianificazione e testo
     -> Esecutore locale (gioco, desktop, browser, app)
     -> Nuova osservazione e verifica esito
     -> Log, memoria persistente e trigger successivo
 ```
 
-Il DGX Spark ospita l'unica istanza Qwen e il gateway. I programmi esterni osservano e agiscono dove gira l'ambiente: per esempio Mineflayer sul server Minecraft oppure un futuro Jarvis sul PC Windows. Il fork fornisce `:8088/v1/systemone` per decisioni tipizzate e `:8000/v1/chat/completions` per pianificazione/testo; l'orchestrazione è responsabilità del programma che li chiama.
+Il DGX Spark ospita l'unica istanza Qwen. I programmi esterni osservano e agiscono dove gira l'ambiente: per esempio Mineflayer sul server Minecraft oppure un futuro Jarvis sul PC Windows. **Target: un'unica origine `:8000` con `/v1/systemone`, `/v1/vision/{state_id}/frame` e le route vLLM già esistenti.** L'orchestrazione è responsabilità del programma che le chiama. La porta `:8088` è l'implementazione sperimentale attuale, non un requisito del protocollo.
+
+Per avere davvero la stessa porta, la route SystemOne va installata nell'app FastAPI della build vLLM pinned, come avviene già per la route diagnostica hidden-state, mantenendo un solo ciclo di vita per client HTTP/frame store. In alternativa un reverse proxy potrebbe esporre la stessa origine spostando vLLM su una porta interna, ma non è il percorso preferito per questa build. Non basta impostare `VISUAL_PORT=8000`: la porta è già occupata. Non assumere che i plugin documentati dall'ultima vLLM esistano nella build Eugr pinned; verificare le capacità di quella build prima di implementare. L'integrazione richiede il normale riavvio del server per caricare la patch, da pianificare solo dopo test e review.
 
 Con `state_id` omesso o `null`, `/v1/systemone` non legge un frame e invia a Qwen lo **stato testuale** costruito dai tool, dall'utente o da un precedente passo di Qwen. Non sopprime la richiesta: salta solo la parte visiva. Con `state_id` presente, il frame JPEG corrente della sessione è obbligatorio. Il gateway non osserva da sé lo schermo né richiama strumenti autonomamente.
 
@@ -23,7 +25,7 @@ Con `state_id` omesso o `null`, `/v1/systemone` non legge un frame e invia a Qwe
 | Disponibile ora | Funzione |
 | --- | --- |
 | Qwen vLLM `:8000/v1/chat/completions` | Generazione, visione e tool calling se un harness fornisce e gestisce realmente i tool. |
-| Gateway `:8088/v1/systemone` | `state` + domande `choice`, `noul`, `score`; immagine tramite `state_id` oppure solo testo senza `state_id`. Una chiamata vLLM per domanda. |
+| Gateway sperimentale `:8088/v1/systemone` | `state` + domande `choice`, `noul`, `score`; immagine tramite `state_id` oppure solo testo senza `state_id`. Una chiamata vLLM per domanda. Va portato sulla `:8000`. |
 | `POST /v1/vision/{state_id}/frame` | Sostituisce il JPEG della sessione; nessuna storia di frame. |
 | `/flashnext/hidden_state/read` e `/trace` | Diagnostica opt-in del runner corrente; non servono all'esecuzione delle azioni. |
 | Script `push_frame.py`, probe, test e confronti | Test manuali, non un driver per giochi o desktop. |
@@ -66,7 +68,7 @@ task.record(sensor.observe(), decision_or_plan=locals().get("decision", None))
 
 **Integrazione prevista: usare un progetto Minecraft esistente.** `nthclrd/jevcraft` combina Mineflayer, Jev per la tattica e un LLM OpenAI-compatible per la strategia. `akash-kamat/jev-craft` manda quattro domande nel ciclo reattivo e offre fino a 13 obiettivi nel ciclo tattico. `ellistev/typesafe-minecraft-demo` presenta fino a 20 azioni in una domanda. `teknium1/hermes-and-jev-play-minecraft` usa il formato OpenRouter `/api/alpha/decisions`, che richiede un adapter distinto dal nostro `/v1/systemone`. Mindcraft usa un LLM OpenAI-compatible, ma non risulta un client SystemOne nativo. Tutte queste compatibilità vanno provate sui payload reali, non dedotte dalla somiglianza del nome API. Riferimenti: [jevcraft](https://github.com/nthclrd/jevcraft), [jev-craft](https://github.com/akash-kamat/jev-craft), [demo Minecraft](https://github.com/ellistev/typesafe-minecraft-demo), [Hermes/Jev](https://github.com/teknium1/hermes-and-jev-play-minecraft), [Mindcraft](https://github.com/mindcraft-bots/mindcraft).
 
-Il gateway attuale accetta 4 domande, massimo 8 alternative per `choice/score`, `state` solo testuale di 2048 caratteri e un frame separato per `state_id`. Pertanto **nessuno dei controller sopra è certificato plug-and-play**. Il bersaglio di compatibilità più vicino è `jevcraft` per la doppia API Qwen/Jev; il suo client Jev va verificato per URL configurabile e serializzazione. Un profilo di interoperabilità dovrebbe accettare `state` strutturato, criteria/instructions nel formato inviato dai client, più domande/opzioni, alias di modello `jev-latest` e risposte con forme esatte. Misurare latenza con quattro domande: oggi sono quattro chiamate vLLM distinte.
+Il gateway attuale accetta 4 domande, massimo 8 alternative per `choice/score`, `state` solo testuale di 2048 caratteri e un frame separato per `state_id`. Pertanto **nessuno dei controller sopra è certificato plug-and-play**. Il bersaglio di compatibilità più vicino è `jevcraft` per la doppia API Qwen/Jev; il suo client Jev va verificato per URL configurabile e serializzazione. Un profilo di interoperabilità dovrebbe accettare `state` strutturato, criteria/instructions nel formato inviato dai client, più domande/opzioni, alias di modello `jev-latest` e risposte con forme esatte. Misurare latenza con quattro domande: oggi sono quattro chiamate vLLM distinte. La differenza di porta sparirà con l'integrazione, ma l'eventuale differenza di schema resta da risolvere.
 
 **Tool dei client esterni, già presenti in forma specifica nei progetti citati:** osservazione del mondo, elenco delle azioni legali, esecuzione e verifica. Per Minecraft Mineflayer usa lo stato strutturato del gioco e il protocollo del bot; screenshot e pulsanti di tastiera non sono prerequisiti dell'endpoint.
 
@@ -109,9 +111,10 @@ Triage e QA senza azioni sul desktop sono i primi casi utili per validare router
 ## 7. Sequenza per il nostro fork, poi esperimenti esterni
 
 1. **Registrare i payload dei client esistenti** per Minecraft, browser e SDK: forme di `state`, domande, modelli, autenticazione, URL e risposte attese. Non cambiare l'API sulla base di esempi inventati.
-2. **Stabilizzare il gateway pinned:** gestire l'HTTP 500 dei logprob, comportamento in errore, testare solo testo e immagine dopo il riavvio del solo gateway. Nessun aggiornamento automatico di Eugr.
+2. **Stabilizzare il gateway pinned:** gestire l'HTTP 500 dei logprob, comportamento in errore, testare solo testo e immagine in isolamento. Nessun aggiornamento automatico di Eugr.
 3. **Ampliare il profilo di compatibilità** dove i test lo giustificano: `state` JSON, criteria strutturati, opzioni e domande in numero sufficiente, alias/modello, eventuale auth opzionale. Esporre un documento di capacità/versione. Evitare di dichiarare parità con la calibrazione Jev senza misurarla.
-4. **Provare il client Minecraft più vicino**, con il nostro endpoint decisionale `:8088` e Qwen chat `:8000`; limitare l'adapter ai confini HTTP/schema del progetto esterno. Misurare errori, latenza e decisioni per secondo. Mindcraft resta un test della sola API chat finché non gli si aggiunge un client SystemOne.
-5. **Solo in seguito** costruire Jarvis/desktop e altri programmi come repository separati che consumano queste API. MiniGrid può restare un benchmark supplementare, non la prima integrazione richiesta.
+4. **Montare le route nello stesso server vLLM sulla `:8000`**, con test di avvio/health, chat, decisioni testuali e visive, store e spegnimento. Mantenere la `:8088` soltanto come modalità di prova fino alla migrazione.
+5. **Provare il client Minecraft più vicino**, usando la stessa origine `:8000` per decisioni e Qwen chat; limitare l'adapter ai confini HTTP/schema del progetto esterno. Misurare errori, latenza e decisioni per secondo. Mindcraft resta un test della sola API chat finché non gli si aggiunge un client SystemOne.
+6. **Solo in seguito** costruire Jarvis/desktop e altri programmi come repository separati che consumano queste API. MiniGrid può restare un benchmark supplementare, non la prima integrazione richiesta.
 
 Portabilità Qwen4: protocollo di decisione, orchestratore e tool sono indipendenti dal checkpoint. Verificare `chat_template`, visione, token dei label, `logprob_token_ids` e comportamento dei logprob nel nuovo vLLM. Gli hook `hidden_state.py`/`patch_b12x.py` sono legati alla build corrente e non vanno considerati già portati; non sono necessari al percorso decisionale basato sui logprob.
