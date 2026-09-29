@@ -62,6 +62,19 @@ def capture(base, model, path, prompt, fresh_cache=False, describe=False, trace=
     if len(vector) != math.prod(shape) or not all(math.isfinite(value) for value in vector):
         raise RuntimeError("Invalid hidden vector")
     print(f"{path.name if path else 'text-only'}: {req_id}, shape={result['shape']}, dtype={result['dtype']}, output={reply['choices'][0]['message']['content']!r}")
+    if trace:
+        tail_result = fetch_json(
+            base + "/flashnext/hidden_state/read?" + urllib.parse.urlencode({"req_id": req_id})
+        )
+        if tail_result["shape"] != [2560] or tail_result["dtype"] != "float32":
+            raise RuntimeError("Unexpected single-vector format during trace cross-check")
+        tail = array.array("f")
+        tail.frombytes(base64.b64decode(tail_result["b64"], validate=True))
+        last_row = vector[-2560:]
+        if len(tail) != 2560:
+            raise RuntimeError("Invalid single-vector width during trace cross-check")
+        max_delta = max(abs(x - y) for x, y in zip(last_row, tail))
+        print(f"  trace[-1] vs /read: max_abs_delta={max_delta:.8g}")
     return vector, (shape[0] if trace else 1)
 
 
