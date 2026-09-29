@@ -93,9 +93,8 @@ if [ "$BACKEND" = b12x ]; then
   # matter how the caller invoked us: without -d this script would block on docker run before it could probe the route.
   [ "$DETACH" = 1 ] || { B12X+=(-d); echo "  note: detached regardless of -d; stop later with 'docker stop $CONTAINER'"; }
   # Then poll for the read route (the only surface the patch adds). If a required anchor was missing (patch_b12x exits,
-  # or the router hook didn't fire), this fails clearly, with container logs. The bare route (no query param) answers
-  # 422/400/404 as a mounted/absent signal: only 404 or a dead server mean NOT mounted -- any mount is proof, and 422 is
-  # what FastAPI itself returns when a required query param is missing, so it must count as mounted.
+  # or the router hook didn't fire), this fails clearly, with container logs. A mounted route rejects a missing
+  # req_id with 400 or 422. Other responses, including server errors, are not proof of a working route.
   if ! HF_HOME="$HF_HOME" ./run-recipe.sh "$RECIPE" "${B12X[@]}" -- \
        --served-model-name "$SERVED_NAME" --max-num-seqs "$SEQS" --kv-cache-memory-bytes "$KV_BYTES" $EXTRA_ARGS; then
     echo "FATAL: run-recipe.sh exited non-zero with HIDDEN_CAPTURE=1 (a required vLLM patch anchor is likely absent)" >&2
@@ -106,13 +105,13 @@ if [ "$BACKEND" = b12x ]; then
   while :; do
     if curl -fsS --max-time 5 "http://127.0.0.1:$PORT/health" >/dev/null 2>&1; then
       code=$(curl -s -o /dev/null --max-time 8 -w '%{http_code}' "http://127.0.0.1:$PORT/flashnext/hidden_state/read" 2>/dev/null) || code=000
-      [ "$code" != 000 ] && [ "$code" != 404 ] && break
+      { [ "$code" = 400 ] || [ "$code" = 422 ]; } && break
     fi
     [ "$(date +%s)" -lt "$deadline" ] || break
     sleep 3
   done
-  if [ "$code" = 404 ] || [ "$code" = 000 ]; then
-    echo "FATAL: HIDDEN_CAPTURE=1 but the read route never appeared (HTTP $code -- api-server routers anchor missing, or worker extension cls not honored)" >&2
+  if [ "$code" != 400 ] && [ "$code" != 422 ]; then
+    echo "FATAL: HIDDEN_CAPTURE=1 but the read route did not reject a missing req_id as expected (HTTP $code)" >&2
     docker logs --tail 100 "$CONTAINER" 2>&1 | tail -12 >&2 || true
     docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
     exit 1
