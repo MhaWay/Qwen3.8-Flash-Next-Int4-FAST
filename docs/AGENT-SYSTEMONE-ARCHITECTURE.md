@@ -1,8 +1,8 @@
-# SystemOne come nucleo decisionale di gioco, computer-use e agente autonomo
+# Endpoint SystemOne interoperabile per harness esterni
 
-Stato: progetto architetturale per `feature/visual-systemone`, 2026-09-29. Non introduce un secondo modello né modifica il serving Eugr/B12X. Le componenti descritte come *da costruire* non sono tool già esposti dal repository.
+Stato: progetto architetturale per `feature/visual-systemone`, 2026-09-29. **Obiettivo del fork: offrire API di decisione e generazione utilizzabili da software esterno. Non costruire nel fork un nuovo harness Minecraft, un controller desktop o Jarvis.** Non introduce un secondo modello né modifica il serving Eugr/B12X. Le componenti chiamate *da costruire* nelle sezioni seguenti sono requisiti dei client esterni, non funzionalità da incorporare nel server.
 
-## 1. Confine tra modello, decisione e azione
+## 1. Confine tra endpoint e client esterno
 
 ```text
 Sorgente evento / osservazione
@@ -14,7 +14,7 @@ Sorgente evento / osservazione
     -> Log, memoria persistente e trigger successivo
 ```
 
-Il DGX Spark può ospitare l'unica istanza Qwen e il gateway. Gli strumenti che osservano e agiscono devono vivere dove gira l'ambiente: per esempio sul PC Windows con la RTX 5080 per Paint o un gioco locale. L'orchestratore può risiedere sul PC o su Spark, usando gli endpoint già raggiungibili attraverso la rete privata.
+Il DGX Spark ospita l'unica istanza Qwen e il gateway. I programmi esterni osservano e agiscono dove gira l'ambiente: per esempio Mineflayer sul server Minecraft oppure un futuro Jarvis sul PC Windows. Il fork fornisce `:8088/v1/systemone` per decisioni tipizzate e `:8000/v1/chat/completions` per pianificazione/testo; l'orchestrazione è responsabilità del programma che li chiama.
 
 Con `state_id` omesso o `null`, `/v1/systemone` non legge un frame e invia a Qwen lo **stato testuale** costruito dai tool, dall'utente o da un precedente passo di Qwen. Non sopprime la richiesta: salta solo la parte visiva. Con `state_id` presente, il frame JPEG corrente della sessione è obbligatorio. Il gateway non osserva da sé lo schermo né richiama strumenti autonomamente.
 
@@ -64,13 +64,19 @@ task.record(sensor.observe(), decision_or_plan=locals().get("decision", None))
 
 ## 3. Gaming e benchmark
 
-**Tool da costruire:** `game.observe()` (frame, HUD/telemetria, timestamp), `game.actions()` (azioni legali), `game.apply(action, hold_ms)` (durata limitata), `game.reset(seed)`, `game.result()` (reward, esito, tempo), `game.release_all()`. Se il gioco fornisce API di stato, usarle accanto al frame; per giochi generici il tool di input deve girare sulla macchina che ha il focus del gioco.
+**Integrazione prevista: usare un progetto Minecraft esistente.** `nthclrd/jevcraft` combina Mineflayer, Jev per la tattica e un LLM OpenAI-compatible per la strategia. `akash-kamat/jev-craft` manda quattro domande nel ciclo reattivo e offre fino a 13 obiettivi nel ciclo tattico. `ellistev/typesafe-minecraft-demo` presenta fino a 20 azioni in una domanda. `teknium1/hermes-and-jev-play-minecraft` usa il formato OpenRouter `/api/alpha/decisions`, che richiede un adapter distinto dal nostro `/v1/systemone`. Mindcraft usa un LLM OpenAI-compatible, ma non risulta un client SystemOne nativo. Tutte queste compatibilità vanno provate sui payload reali, non dedotte dalla somiglianza del nome API. Riferimenti: [jevcraft](https://github.com/nthclrd/jevcraft), [jev-craft](https://github.com/akash-kamat/jev-craft), [demo Minecraft](https://github.com/ellistev/typesafe-minecraft-demo), [Hermes/Jev](https://github.com/teknium1/hermes-and-jev-play-minecraft), [Mindcraft](https://github.com/mindcraft-bots/mindcraft).
+
+Il gateway attuale accetta 4 domande, massimo 8 alternative per `choice/score`, `state` solo testuale di 2048 caratteri e un frame separato per `state_id`. Pertanto **nessuno dei controller sopra è certificato plug-and-play**. Il bersaglio di compatibilità più vicino è `jevcraft` per la doppia API Qwen/Jev; il suo client Jev va verificato per URL configurabile e serializzazione. Un profilo di interoperabilità dovrebbe accettare `state` strutturato, criteria/instructions nel formato inviato dai client, più domande/opzioni, alias di modello `jev-latest` e risposte con forme esatte. Misurare latenza con quattro domande: oggi sono quattro chiamate vLLM distinte.
+
+**Tool dei client esterni, già presenti in forma specifica nei progetti citati:** osservazione del mondo, elenco delle azioni legali, esecuzione e verifica. Per Minecraft Mineflayer usa lo stato strutturato del gioco e il protocollo del bot; screenshot e pulsanti di tastiera non sono prerequisiti dell'endpoint.
 
 **Ciclo:** pianificazione iniziale con Qwen chat; ogni passo acquisisce un'osservazione, pone una domanda corta a SystemOne (es. `move`, `wait`, `release`), esegue per un intervallo definito, poi osserva l'effetto. Qwen chat torna quando il percorso si blocca, l'obiettivo cambia o servono tool nuovi. Il controller decide la durata e impedisce che una vecchia risposta tenga premuti i tasti.
 
-**Benchmark:** partire con [MiniGrid](https://github.com/Farama-Foundation/Minigrid), che ha missioni e azioni discrete; poi una prova visiva 3D come [MineRL](https://github.com/minerllabs/minerl) oppure un gioco locale controllato da screenshot. Registrare seed, numero passi, esito, reward, p50/p95 della decisione, chiamate chat, errori e replay. Confrontare tre condizioni sugli stessi task: sola chat, solo decisioni finite, router ibrido. MiniGrid e MineRL espongono osservazioni/azioni attraverso un'API ambiente, adatta a misure ripetibili.
+**Benchmark:** prima collegare uno dei controller Minecraft esistenti e registrare seed, numero passi, esito, p50/p95 della decisione, chiamate chat ed errori. Confrontare tre configurazioni dello stesso client: LLM solo, decisioni tipizzate, combinazione. [MiniGrid](https://github.com/Farama-Foundation/Minigrid) e [MineRL](https://github.com/minerllabs/minerl) restano test aggiuntivi se vogliamo isolare la qualità del motore decisionale dal comportamento di Mineflayer.
 
 ## 4. Computer-use e Jarvis
+
+**Progetto esterno.** Questa sezione descrive i requisiti che un Jarvis separato avrebbe per chiamare il nostro endpoint; non è un piano per implementare screenshot e input nel fork del modello.
 
 **Tool da costruire sul PC Windows:** `desktop.list_windows`, `desktop.inspect_ui(window)` (albero UI Automation), `desktop.screenshot(window_or_region)`, `desktop.cursor_position`, `desktop.click/drag/type/press`, `desktop.wait_for_change`. Un unico esecutore deve serializzare l'input al desktop, che ha un solo focus e cursore. Usare [UI Automation](https://learn.microsoft.com/en-us/windows/win32/winauto/uiauto-uiautomationoverview) per controlli con identificatori, screenshot per superfici grafiche e [SendInput](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-sendinput) per gesti su canvas. Per pagine web usare locatori e screenshot di [Playwright](https://playwright.dev/docs/locators), anziché coordinate quando esiste un elemento accessibile.
 
@@ -79,6 +85,8 @@ task.record(sensor.observe(), decision_or_plan=locals().get("decision", None))
 **Benchmark:** task locali riproducibili prima delle applicazioni personali; [OSWorld V2](https://github.com/xlang-ai/OSWorld-V2) è un riferimento per compiti lunghi di computer-use, con release/task/asset da fissare per confronti corretti.
 
 ## 5. Agente autonomo ad eventi
+
+**Progetto esterno.** La persistenza, i trigger e le azioni vivono nell'applicazione autonoma; l'endpoint risponde a richieste, non mantiene un ciclo autonomo.
 
 **Tool da costruire:** `events.emit/subscribe` per webhook, file, timer e notifiche locali; `memory.read/write`; `jobs.enqueue/status/cancel`; catalogo dei tool applicativi; `agent.pause/resume/stop`; log di decisioni e risultati. Un evento diventa uno snapshot compatto dello stato, SystemOne decide `ignore | notify | act | ask_model`, Qwen chat pianifica quando serve, l'esecutore richiama tool mirati, e un evento di completamento verifica il risultato.
 
@@ -98,12 +106,12 @@ Un agente continuo necessita idempotency key per evento/azione, deadline, limiti
 
 Triage e QA senza azioni sul desktop sono i primi casi utili per validare router ed eventi prima di passare al controllo continuo di giochi e applicazioni.
 
-## 7. Sequenza di implementazione
+## 7. Sequenza per il nostro fork, poi esperimenti esterni
 
-1. **Stabilizzare l'API decisionale:** gestire l'HTTP 500 dei logprob nella build pinned, definire comportamento in errore, testare solo testo e immagine dopo il riavvio del gateway. Nessun aggiornamento automatico di Eugr.
-2. **Contratto unico di osservazione/azione:** schema di `Observation`, `Action`, `Result`, timestamp, deadline e log; adapter `:8088` e `:8000`, tool dichiarati da un harness o MCP. MCP standardizza la chiamata dei tool, ma non fornisce da sé screenshot o input: dobbiamo implementarli/esporli dove gira l'ambiente.
-3. **Benchmark MiniGrid:** uno strumento `step/reset`, router fast/slow, replay e metriche. Prima di parlare di 10 Hz misurare end-to-end.
-4. **Bridge Windows + Paint:** UIA, screenshot, cursore, gesto, verifica; in seguito web/Playwright e giochi reali.
-5. **Event loop persistente:** code/scheduler/memoria e integrazioni Jarvis. Migrare a broker/workflow distribuiti solo se il carico o la durata dei task lo richiedono.
+1. **Registrare i payload dei client esistenti** per Minecraft, browser e SDK: forme di `state`, domande, modelli, autenticazione, URL e risposte attese. Non cambiare l'API sulla base di esempi inventati.
+2. **Stabilizzare il gateway pinned:** gestire l'HTTP 500 dei logprob, comportamento in errore, testare solo testo e immagine dopo il riavvio del solo gateway. Nessun aggiornamento automatico di Eugr.
+3. **Ampliare il profilo di compatibilità** dove i test lo giustificano: `state` JSON, criteria strutturati, opzioni e domande in numero sufficiente, alias/modello, eventuale auth opzionale. Esporre un documento di capacità/versione. Evitare di dichiarare parità con la calibrazione Jev senza misurarla.
+4. **Provare il client Minecraft più vicino**, con il nostro endpoint decisionale `:8088` e Qwen chat `:8000`; limitare l'adapter ai confini HTTP/schema del progetto esterno. Misurare errori, latenza e decisioni per secondo. Mindcraft resta un test della sola API chat finché non gli si aggiunge un client SystemOne.
+5. **Solo in seguito** costruire Jarvis/desktop e altri programmi come repository separati che consumano queste API. MiniGrid può restare un benchmark supplementare, non la prima integrazione richiesta.
 
 Portabilità Qwen4: protocollo di decisione, orchestratore e tool sono indipendenti dal checkpoint. Verificare `chat_template`, visione, token dei label, `logprob_token_ids` e comportamento dei logprob nel nuovo vLLM. Gli hook `hidden_state.py`/`patch_b12x.py` sono legati alla build corrente e non vanno considerati già portati; non sono necessari al percorso decisionale basato sui logprob.
