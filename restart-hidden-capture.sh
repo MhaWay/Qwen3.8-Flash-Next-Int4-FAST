@@ -85,8 +85,14 @@ root = Path("/usr/local/lib/python3.12/dist-packages/vllm")
 runner = (root / "v1/worker/gpu/model_runner.py").read_text()
 routers = (root / "entrypoints/launchers/api_server/routers.py").read_text()
 anchor = "    ) -> tuple[SamplerOutput, torch.Tensor, torch.Tensor]:\n        shard_metadata = None"
+patched_capture = (
+    runner.count("        hn = getattr(self, \"_hn_on\", None)") == 1
+    and runner.count("                capture_step(self, input_batch, hidden_states)") == 1
+)
 checks = {
-    "sample-anchor": runner.count(anchor) == 1,
+    # The already-running HIDDEN_CAPTURE=1 container has replaced this anchor.
+    # A fresh container starts from the original image and is patched at launch.
+    "sample-anchor-or-live-hook": runner.count(anchor) == 1 or patched_capture,
     "route-anchor": routers.count("    register_vllm_serve_api_routers(app)\n") == 1,
 }
 for name in ("is_prefilling_np", "num_computed_tokens_np", "seq_lens_cpu_upper_bound",
