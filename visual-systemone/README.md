@@ -7,7 +7,7 @@ An **opt-in experimental companion** to this repository's current vLLM server. I
 1. On the Spark, use your **existing** model cache and Eugr b12x installation. This companion does not call `setup.sh` or download model weights. If your current Qwen service is already running with b12x, leave it running and confirm `curl -sS http://127.0.0.1:8000/v1/models`. If it is stopped, start it from this repository with `BACKEND=b12x ./serve.sh` (or `BACKEND=b12x ./serve.sh -d` for background operation). This requires the Eugr recipe/mod and pinned image to be installed already; `serve.sh` checks for the cached model, table, recipe and image and exits if they are absent. Do not start a second Qwen process for the companion.
 2. Your existing image use establishes that the current serving stack handles images. On the Spark, the **new** check for System One is candidate logprobs on an image: `python3 visual-systemone/scripts/probe.py frame.jpg --url http://127.0.0.1:8000`. The probe also repeats a small image request as a sanity check. The final response must contain both requested `token_id` values in the first `top_logprobs` entry. If it does not, inspect this server build's logprob implementation before starting the companion. This gateway accepts individual JPEG frames; it does not currently ingest video files or streams.
 3. Install into a Python virtual environment: `python3 -m venv .venv && .venv/bin/pip install -e './visual-systemone[test]'` from the repository root. Start `VISUAL_VLLM_URL=http://127.0.0.1:8000 .venv/bin/visual-systemone`. It binds **127.0.0.1:8088** by default. For a Windows client, use an SSH tunnel or private network binding with access control; never expose this unauthenticated prototype publicly.
-4. Upload a recent JPEG: `python3 visual-systemone/scripts/push_frame.py frame.jpg`. Query `/v1/systemone` (example below). The gateway keeps one current frame per session, no video backlog and no image history. The default TTL is 10 seconds, 8 sessions, 300 KB per JPEG.
+4. For an image decision, upload a recent JPEG: `python3 visual-systemone/scripts/push_frame.py frame.jpg`, then query `/v1/systemone` with `state_id` (example below). For a text-only decision, omit `state_id` or set it to `null`; no frame is needed. A supplied `state_id` still requires a current frame. The gateway keeps one current frame per session, no video backlog and no image history. The default TTL is 10 seconds, 8 sessions, 300 KB per JPEG.
 5. Benchmark visual correctness and end-to-end p50/p95 latency on your Spark before connecting a controller. At most one inference runs per session. A newer frame invalidates an in-flight decision with HTTP 409; HTTP 429 means one is already in flight. On any error, release all game controls.
 
 The [NVIDIA forum update by azampatti](https://forums.developer.nvidia.com/t/up-to-70tok-s-qwen3-8-flash-next-int4-autoround/382733?page=7) explicitly says the September 23 Eugr integration needs **no model update** when the latest weights are already cached. The [later pinned-image discussion](https://forums.developer.nvidia.com/t/up-to-70tok-s-qwen3-8-flash-next-int4-autoround/382733?page=10) recommends `./eugr-setup.sh` rather than overwriting `vllm-node-b12x` with Eugr's moving `latest` via `build-and-copy.sh`. If the mod or pinned image is missing, run `./eugr-setup.sh` once; it may download the **container image**, but does not re-download model weights. Eugr's b12x stack can use more Spark RAM than the classic image; reduce `KV_BYTES` only if loading fails due to memory pressure. Keep your existing working service untouched until the companion probe is ready.
@@ -17,6 +17,14 @@ curl -sS http://127.0.0.1:8088/v1/systemone -H 'Content-Type: application/json' 
 ```
 
 This extends the Jev wire shape with `state_id`, as the original API has no visual session reference. `probabilities` are a softmax over listed options, **not calibrated success probabilities**. `confidence` is normalized inverse entropy and likewise not a safety guarantee. `stop` should be checked against independent safeguards before any game action.
+
+Text-only request (no frame or visual session):
+
+```bash
+curl -sS http://127.0.0.1:8088/v1/systemone -H 'Content-Type: application/json' -d '{"model":"qwen-visual-choice-v0","state":"The customer was charged twice.","questions":{"billing":{"type":"noul","instructions":"Is this a billing issue?"}}}'
+```
+
+In this mode `state_id` and `seq` are `null` in the response; the same running Qwen instance handles both modes.
 
 ## Architecture and the CLM path
 
