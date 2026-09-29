@@ -77,6 +77,20 @@ class MissingCandidate(FakeVLLM):
         return response
 
 
+class TextOnlyVLLM(FakeVLLM):
+    async def post(self, path, json):
+        if path == "/tokenize":
+            return await super().post(path, json)
+        assert path == "/v1/chat/completions"
+        content = json["messages"][1]["content"]
+        assert len(content) == 1 and content[0]["type"] == "text"
+        assert "Which category?" in content[0]["text"]
+        return FakeResponse({"choices": [{"logprobs": {"content": [{"top_logprobs": [
+            {"token": "token_id:65", "logprob": -0.1},
+            {"token": "token_id:66", "logprob": -2.1}]}]}}],
+            "usage": {"prompt_tokens": 25}})
+
+
 class FrameReplacedAfterExpiry(FakeVLLM):
     async def post(self, path, json):
         if path == "/v1/chat/completions":
@@ -103,6 +117,30 @@ def test_end_to_end_choice_one_current_frame():
         assert result.json()["seq"] == upload.json()["seq"]
         assert client.post("/v1/vision/minecraft/frame", data=JPEG,
                            headers={"Content-Type": "image/jpeg"}).json()["seq"] == 2
+
+
+@pytest.mark.parametrize("explicit_null", [False, True])
+def test_text_only_systemone_without_frame(explicit_null):
+    with TestClient(app) as client:
+        app.state.client = TextOnlyVLLM()
+        body = {"state": "The customer was billed twice.", "questions": {
+            "team": {"type": "choice", "instructions": "Which category?",
+                     "criteria": {"billing": "Billing", "other": "Other"}}}}
+        if explicit_null:
+            body["state_id"] = None
+        response = client.post("/v1/systemone", json=body)
+        assert response.status_code == 200, response.text
+        assert response.json()["answers"]["team"]["choice"] == "billing"
+        assert response.json()["state_id"] is None and response.json()["seq"] is None
+        assert not app.state.store.frames
+
+
+def test_supplied_session_still_requires_frame():
+    with TestClient(app) as client:
+        response = client.post("/v1/systemone", json={
+            "state_id": "absent", "state": "Test", "questions": {
+                "team": {"type": "noul", "instructions": "Is this urgent?"}}})
+        assert response.status_code == 409
 
 
 def test_missing_candidate_returns_error_instead_of_action():
